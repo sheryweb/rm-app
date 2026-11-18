@@ -598,30 +598,58 @@ function toast(message) {
   setTimeout(() => el.remove(), 3200);
 }
 
+/**
+ * One PDF per group. Units of different projects can be picked together: each project gets
+ * its own offer, because every project has its own offer template. A layout that cannot go
+ * into a multi-unit offer gets a single offer of its own.
+ */
+function offerGroups(units) {
+  const groups = [];
+  const byProject = new Map();
+  units.forEach((unit) => {
+    if (!unit.multiOfferAllowed) {
+      groups.push({ projectName: unit.projectName, units: [unit] });
+      return;
+    }
+    if (!byProject.has(unit.projectId)) {
+      const group = { projectName: unit.projectName, units: [] };
+      byProject.set(unit.projectId, group);
+      groups.push(group);
+    }
+    byProject.get(unit.projectId).units.push(unit);
+  });
+  return groups;
+}
+
+function projectCount(units) {
+  return new Set(units.map((unit) => unit.projectId)).size;
+}
+
 function toggleOfferUnit(unit, rowEl) {
   if (offerSelection.has(unit.id)) {
     offerSelection.delete(unit.id);
   } else {
-    const others = [...offerSelection.values()];
     const limit = (offerOptions && offerOptions.maxUnits) || 15;
-    if (others.length && others[0].projectId !== unit.projectId) {
-      toast("One offer can only hold units of the same project.");
-      return;
-    }
-    if (others.length >= limit) {
-      toast("A maximum of " + limit + " units can go into one offer.");
-      return;
-    }
-    if (
-      others.length &&
-      (!unit.multiOfferAllowed || others.some((o) => !o.multiOfferAllowed))
-    ) {
-      toast("This layout can only be offered on its own.");
+    const sameProject = [...offerSelection.values()].filter(
+      (other) => other.projectId === unit.projectId
+    );
+    if (sameProject.length >= limit) {
+      toast(
+        "A maximum of " + limit + " units per project can go into one offer."
+      );
       return;
     }
     offerSelection.set(unit.id, unit);
   }
   rowEl.classList.toggle("is-selected", offerSelection.has(unit.id));
+  renderOfferBar();
+}
+
+function clearOfferSelection() {
+  offerSelection.clear();
+  document
+    .querySelectorAll(".row.is-selected")
+    .forEach((el) => el.classList.remove("is-selected"));
   renderOfferBar();
 }
 
@@ -640,21 +668,18 @@ function renderOfferBar() {
     bar.className = "offer-bar";
     root.appendChild(bar);
   }
-  const count = offerSelection.size;
+  const units = [...offerSelection.values()];
+  const projects = projectCount(units);
   bar.innerHTML = `
     <div class="offer-bar-text">
-      <b>${count} unit${count === 1 ? "" : "s"} selected</b>
-      <span>${esc([...offerSelection.values()][0].projectName)}</span>
+      <b>${units.length} unit${units.length === 1 ? "" : "s"} selected</b>
+      <span>${projects === 1 ? esc(units[0].projectName) : projects + " projects"}</span>
     </div>
     <button class="bar-button bar-clear" id="offer-clear">Clear</button>
     <button class="bar-button bar-go" id="offer-go">Sales Offer</button>`;
-  document.getElementById("offer-clear").addEventListener("click", () => {
-    offerSelection.clear();
-    document
-      .querySelectorAll(".row.is-selected")
-      .forEach((el) => el.classList.remove("is-selected"));
-    renderOfferBar();
-  });
+  document
+    .getElementById("offer-clear")
+    .addEventListener("click", clearOfferSelection);
   document.getElementById("offer-go").addEventListener("click", openOfferSheet);
 }
 
@@ -669,11 +694,12 @@ function sizeText(bytes) {
 }
 
 async function openOfferSheet() {
-  const units = [...offerSelection.values()];
-  if (!units.length) {
+  const groups = offerGroups([...offerSelection.values()]);
+  if (!groups.length) {
     return;
   }
-  const multi = units.length > 1;
+  const unitTotal = groups.reduce((sum, group) => sum + group.units.length, 0);
+  const anyMulti = groups.some((group) => group.units.length > 1);
   closeSheet();
   const backdrop = document.createElement("div");
   backdrop.className = "sheet-backdrop";
@@ -686,111 +712,171 @@ async function openOfferSheet() {
       closeSheet();
     }
   });
+  const closeOnly = (message) => {
+    body.innerHTML = `${errorBox(message)}<button class="button-secondary" id="sheet-close">Close</button>`;
+    body.querySelector("#sheet-close").addEventListener("click", closeSheet);
+  };
 
   try {
     if (!offerOptions) {
       offerOptions = await get("offers/options");
     }
   } catch (error) {
-    body.innerHTML = `${errorBox(error.message)}<button class="button-secondary" id="sheet-close">Close</button>`;
-    body.querySelector("#sheet-close").addEventListener("click", closeSheet);
+    closeOnly(error.message);
     return;
   }
   if (!offerOptions.allowed) {
-    body.innerHTML = `${errorBox("Sales offers are not available for your profile.")}<button class="button-secondary" id="sheet-close">Close</button>`;
-    body.querySelector("#sheet-close").addEventListener("click", closeSheet);
+    closeOnly("Sales offers are not available for your profile.");
     return;
   }
 
-  const unitList = units.map((u) => `<li>${esc(u.title)}</li>`).join("");
-  const currencyPicker = multi
-    ? `<label class="field-label" for="offer-currency">Also show prices in (optional)</label>
+  const groupList = groups
+    .map(
+      (group) => `
+      <div class="sheet-group">
+        <p class="sheet-group-title">${esc(group.projectName)} · ${
+          group.units.length === 1
+            ? "single offer"
+            : "one offer for " + group.units.length + " units"
+        }</p>
+        <ul class="sheet-units">${group.units.map((u) => `<li>${esc(u.title)}</li>`).join("")}</ul>
+      </div>`
+    )
+    .join("");
+  const currencyPicker = anyMulti
+    ? `<label class="field-label" for="offer-currency">Also show prices in (optional, multi-unit offers)</label>
        <select class="select" id="offer-currency">
          <option value="">Project currency only</option>
          ${(offerOptions.currencies || []).map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join("")}
        </select>`
     : "";
+  const pdfWord = groups.length === 1 ? "PDF" : groups.length + " PDFs";
   body.innerHTML = `
-    <h2>${multi ? "Sales Offer for " + units.length + " Units" : "Sales Offer"}</h2>
-    <p class="muted">${esc(units[0].projectName)}</p>
-    <ul class="sheet-units">${unitList}</ul>
+    <h2>${unitTotal === 1 ? "Sales Offer" : "Sales Offer for " + unitTotal + " Units"}</h2>
+    ${
+      groups.length > 1
+        ? `<p class="muted">Each project has its own offer document, so you get ${groups.length} PDFs.</p>`
+        : ""
+    }
+    ${groupList}
     ${currencyPicker}
     <div id="sheet-status"></div>
-    <button class="button-primary" id="offer-generate">Generate PDF</button>
+    <button class="button-primary" id="offer-generate">Generate ${pdfWord}</button>
     <button class="button-plain" id="sheet-close">Cancel</button>`;
   body.querySelector("#sheet-close").addEventListener("click", closeSheet);
 
   body.querySelector("#offer-generate").addEventListener("click", async () => {
     const status = body.querySelector("#sheet-status");
     const currencyEl = body.querySelector("#offer-currency");
-    const request = {
-      unitIds: units.map((u) => u.id),
-      currencyCode: currencyEl ? currencyEl.value : ""
-    };
+    const currencyCode = currencyEl ? currencyEl.value : "";
     busy = true;
     body.querySelector("#offer-generate").disabled = true;
     body.querySelector("#sheet-close").disabled = true;
     const step = (text) => {
       status.innerHTML = `<div class="working"><span class="spinner"></span><span>${esc(text)}</span></div>`;
     };
-    try {
-      step("Preparing…");
-      await post("offers/cleanup", request);
-      step("Generating the PDF…");
-      const result = await post("offers/generate", request);
-      step("Downloading…");
-      const file = await downloadFile(
-        result.contentVersionId,
-        result.fileName,
-        "application/pdf"
-      );
-      busy = false;
-      showOfferResult(body, file, result);
-    } catch (error) {
-      busy = false;
-      if (error instanceof SignedOutError) {
-        closeSheet();
-        handleError(error);
-        return;
+    const outcomes = [];
+    for (let i = 0; i < groups.length; i++) {
+      const group = groups[i];
+      const label =
+        groups.length === 1
+          ? ""
+          : " (" + (i + 1) + " of " + groups.length + ")";
+      const request = {
+        unitIds: group.units.map((u) => u.id),
+        currencyCode: group.units.length > 1 ? currencyCode : ""
+      };
+      try {
+        step("Preparing" + label + "…");
+        await post("offers/cleanup", request);
+        step("Generating the PDF" + label + "…");
+        const result = await post("offers/generate", request);
+        step("Downloading" + label + "…");
+        // two offers made on one day share a title, so the project name keeps the files apart
+        const fileName =
+          groups.length > 1 && group.units.length > 1
+            ? result.fileName.replace(
+                /\.pdf$/i,
+                " - " + group.projectName.replace(/[\\/:*?"<>|]/g, " ") + ".pdf"
+              )
+            : result.fileName;
+        const file = await downloadFile(
+          result.contentVersionId,
+          fileName,
+          "application/pdf"
+        );
+        outcomes.push({ group, file });
+      } catch (error) {
+        if (error instanceof SignedOutError) {
+          busy = false;
+          closeSheet();
+          handleError(error);
+          return;
+        }
+        outcomes.push({ group, error: error.message });
       }
-      status.innerHTML = errorBox(error.message);
+    }
+    busy = false;
+    if (outcomes.every((outcome) => outcome.error)) {
+      status.innerHTML = errorBox(outcomes[0].error);
       body.querySelector("#offer-generate").disabled = false;
       body.querySelector("#offer-generate").textContent = "Try Again";
       body.querySelector("#sheet-close").disabled = false;
+      return;
     }
+    showOfferResult(body, outcomes);
   });
 }
 
-function showOfferResult(body, file, result) {
-  const url = URL.createObjectURL(file);
-  const canShare = Boolean(
-    navigator.canShare && navigator.canShare({ files: [file] })
-  );
+function showOfferResult(body, outcomes) {
+  const done = outcomes.filter((outcome) => outcome.file);
+  const failed = outcomes.filter((outcome) => outcome.error);
+  const files = done.map((outcome) => outcome.file);
+  const urls = files.map((file) => URL.createObjectURL(file));
+  const canShare = Boolean(navigator.canShare && navigator.canShare({ files }));
+  const fileRows = done
+    .map(
+      (outcome, i) => `
+      <div class="file-row">
+        <div class="file-text">
+          <b>${esc(outcome.group.projectName)}</b>
+          <span>${esc(outcome.file.name)} · ${sizeText(outcome.file.size)}</span>
+        </div>
+        <a class="file-link" href="${urls[i]}" target="_blank" rel="noopener">Open</a>
+        <a class="file-link" href="${urls[i]}" download="${esc(outcome.file.name)}">Save</a>
+      </div>`
+    )
+    .join("");
+  const failedRows = failed
+    .map(
+      (outcome) =>
+        `<div class="notice notice-error">${esc(outcome.group.projectName)}: ${esc(outcome.error)}</div>`
+    )
+    .join("");
   body.innerHTML = `
     <div class="done-mark">✓</div>
-    <h2>Sales Offer Ready</h2>
-    <p class="muted">${esc(file.name)} · ${sizeText(file.size)}</p>
-    <p class="muted">Saved on the unit in Salesforce as "${esc(result.title)}".</p>
-    ${canShare ? `<button class="button-primary" id="offer-share">Share (WhatsApp, Email…)</button>` : ""}
-    <a class="${canShare ? "button-outline" : "button-primary"} button-link" id="offer-open" href="${url}" target="_blank" rel="noopener">Open PDF</a>
-    <a class="button-outline button-link" href="${url}" download="${esc(file.name)}">Download</a>
+    <h2>${files.length === 1 ? "Sales Offer Ready" : files.length + " Sales Offers Ready"}</h2>
+    <p class="muted">Saved on the unit${files.length === 1 ? "" : "s"} in Salesforce as well.</p>
+    <div class="file-list">${fileRows}</div>
+    ${failedRows}
+    ${
+      canShare
+        ? `<button class="button-primary" id="offer-share">Share ${files.length === 1 ? "" : "All "}(WhatsApp, Email…)</button>`
+        : ""
+    }
     <button class="button-plain" id="sheet-done">Done</button>`;
   if (canShare) {
     body.querySelector("#offer-share").addEventListener("click", async () => {
       try {
-        await navigator.share({ files: [file], title: file.name });
+        await navigator.share({ files, title: "Sales Offer" });
       } catch (e) {
         // the user closed the share sheet
       }
     });
   }
   body.querySelector("#sheet-done").addEventListener("click", () => {
-    URL.revokeObjectURL(url);
-    offerSelection.clear();
-    document
-      .querySelectorAll(".row.is-selected")
-      .forEach((el) => el.classList.remove("is-selected"));
-    renderOfferBar();
+    urls.forEach((url) => URL.revokeObjectURL(url));
+    clearOfferSelection();
     closeSheet();
   });
 }

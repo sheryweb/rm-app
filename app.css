@@ -879,3 +879,75 @@ a.button-primary {
 .has-offer-bar .screen {
   padding-bottom: calc(var(--tabbar) + env(safe-area-inset-bottom) + 100px);
 }
+
+.sheet-group {
+  margin-top: 14px;
+}
+
+.sheet-group-title {
+  margin-bottom: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--navy);
+}
+
+.sheet-group .sheet-units {
+  margin: 0;
+}
+
+.sheet .field-label {
+  margin-top: 16px;
+}
+
+.file-list {
+  margin: 16px 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.file-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+.file-row + .file-row {
+  border-top: 1px solid var(--line);
+}
+
+.file-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.file-text b,
+.file-text span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-text span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.file-link {
+  flex: 0 0 auto;
+  min-height: 38px;
+  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  border-radius: 10px;
+  background: var(--info-bg);
+  color: var(--info);
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.sheet .notice-error {
+  margin-top: 8px;
+  text-align: left;
+}
