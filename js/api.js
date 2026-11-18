@@ -4,34 +4,39 @@ import { tokens, refreshAccessToken } from "./auth.js";
 
 export class SignedOutError extends Error {}
 
-async function send(route, params) {
-  const t = tokens();
-  if (!t) {
-    throw new SignedOutError("Please sign in.");
-  }
-  const query = new URLSearchParams();
-  Object.entries(params || {}).forEach(([key, value]) => {
-    if (value !== undefined && value !== null && value !== "") {
-      query.set(key, value);
-    }
-  });
-  const text = query.toString();
-  return fetch(
-    t.instance_url + CONFIG.apiPath + route + (text ? "?" + text : ""),
-    { headers: { Authorization: "Bearer " + t.access_token } }
-  );
-}
+const SIGNED_OUT = "Your sign-in has ended. Please sign in again.";
 
-export async function get(route, params) {
-  let response = await send(route, params);
+/** Sends a request with the RM's token; when the token has expired, renews it once and retries. */
+async function authorized(buildUrl, options) {
+  const attempt = () => {
+    const t = tokens();
+    if (!t) {
+      throw new SignedOutError("Please sign in.");
+    }
+    return fetch(buildUrl(t.instance_url), {
+      ...options,
+      headers: {
+        ...(options && options.headers),
+        Authorization: "Bearer " + t.access_token
+      }
+    });
+  };
+  let response = await attempt();
   if (response.status === 401) {
     try {
       await refreshAccessToken();
     } catch (e) {
-      throw new SignedOutError("Your sign-in has ended. Please sign in again.");
+      throw new SignedOutError(SIGNED_OUT);
     }
-    response = await send(route, params);
+    response = await attempt();
+    if (response.status === 401) {
+      throw new SignedOutError(SIGNED_OUT);
+    }
   }
+  return response;
+}
+
+async function readJson(response) {
   let body = null;
   try {
     body = await response.json();
@@ -42,10 +47,7 @@ export async function get(route, params) {
     const message = Array.isArray(body)
       ? body[0] && body[0].message
       : body && body.error;
-    if (response.status === 401) {
-      throw new SignedOutError("Your sign-in has ended. Please sign in again.");
-    }
-    if (response.status === 403) {
+    if (response.status === 403 && !message) {
       throw new Error(
         "Your user is not set up for this app yet. Ask the Salesforce admin for RM App Access."
       );
@@ -55,4 +57,45 @@ export async function get(route, params) {
     );
   }
   return body;
+}
+
+export async function get(route, params) {
+  const query = new URLSearchParams();
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== "") {
+      query.set(key, value);
+    }
+  });
+  const text = query.toString();
+  const response = await authorized(
+    (base) => base + CONFIG.apiPath + route + (text ? "?" + text : "")
+  );
+  return readJson(response);
+}
+
+export async function post(route, body) {
+  const response = await authorized((base) => base + CONFIG.apiPath + route, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {})
+  });
+  return readJson(response);
+}
+
+/** Downloads a Salesforce file (by ContentVersion id) with the RM's login; returns a File. */
+export async function downloadFile(contentVersionId, fileName, mimeType) {
+  const response = await authorized(
+    (base) =>
+      base +
+      "/services/data/v61.0/sobjects/ContentVersion/" +
+      encodeURIComponent(contentVersionId) +
+      "/VersionData"
+  );
+  if (!response.ok) {
+    throw new Error(
+      "The file could not be downloaded (" + response.status + ")."
+    );
+  }
+  const bytes = await response.arrayBuffer();
+  return new File([bytes], fileName, { type: mimeType });
 }

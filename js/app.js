@@ -6,7 +6,7 @@ import {
   completeLoginIfReturning,
   signOut
 } from "./auth.js";
-import { get, SignedOutError } from "./api.js";
+import { get, post, downloadFile, SignedOutError } from "./api.js";
 
 const root = document.getElementById("app");
 const PAGE_SIZE = 25;
@@ -556,16 +556,243 @@ function unitRow(unit) {
     unit.floor == null || unit.floor === "" ? null : "Floor " + unit.floor,
     unit.view
   ].filter(Boolean);
+  // Available units (and Blocked ones, which only directors receive) can go into a sales offer.
+  const offerable = unit.status === "available" || unit.status === "blocked";
+  const picked = offerable
+    ? esc(
+        JSON.stringify({
+          id: unit.id,
+          title: unit.title,
+          projectId: unit.projectId,
+          projectName: unit.projectName,
+          multiOfferAllowed: unit.multiOfferAllowed !== false
+        })
+      )
+    : "";
   return `
-    <article class="row">
+    <article class="row${offerable ? " is-selectable" : ""}${offerSelection.has(unit.id) ? " is-selected" : ""}"${
+      offerable ? ` data-unit="${picked}"` : ""
+    }>
       <div class="row-head">
-        <h4>${esc(unit.title)}</h4>
+        <h4>${offerable ? `<span class="check" aria-hidden="true"></span>` : ""}${esc(unit.title)}</h4>
         <span class="pill status-${esc(unit.status)}">${esc(unit.statusLabel)}</span>
       </div>
       <p class="muted">${esc(place.join(" · "))}</p>
       <p class="muted">${esc(facts.join(" · "))}</p>
       <p class="price">${esc(money(unit.price, unit.currencyCode))}</p>
     </article>`;
+}
+
+// ------------------------------------------------------------- sales offers
+
+/** Units picked for a sales offer: id -> { id, title, projectId, projectName, multiOfferAllowed }. */
+const offerSelection = new Map();
+let offerOptions = null;
+
+function toast(message) {
+  document.querySelectorAll(".toast").forEach((el) => el.remove());
+  const el = document.createElement("div");
+  el.className = "toast";
+  el.textContent = message;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 3200);
+}
+
+function toggleOfferUnit(unit, rowEl) {
+  if (offerSelection.has(unit.id)) {
+    offerSelection.delete(unit.id);
+  } else {
+    const others = [...offerSelection.values()];
+    const limit = (offerOptions && offerOptions.maxUnits) || 15;
+    if (others.length && others[0].projectId !== unit.projectId) {
+      toast("One offer can only hold units of the same project.");
+      return;
+    }
+    if (others.length >= limit) {
+      toast("A maximum of " + limit + " units can go into one offer.");
+      return;
+    }
+    if (
+      others.length &&
+      (!unit.multiOfferAllowed || others.some((o) => !o.multiOfferAllowed))
+    ) {
+      toast("This layout can only be offered on its own.");
+      return;
+    }
+    offerSelection.set(unit.id, unit);
+  }
+  rowEl.classList.toggle("is-selected", offerSelection.has(unit.id));
+  renderOfferBar();
+}
+
+function renderOfferBar() {
+  let bar = document.getElementById("offer-bar");
+  document.body.classList.toggle("has-offer-bar", offerSelection.size > 0);
+  if (offerSelection.size === 0) {
+    if (bar) {
+      bar.remove();
+    }
+    return;
+  }
+  if (!bar) {
+    bar = document.createElement("div");
+    bar.id = "offer-bar";
+    bar.className = "offer-bar";
+    root.appendChild(bar);
+  }
+  const count = offerSelection.size;
+  bar.innerHTML = `
+    <div class="offer-bar-text">
+      <b>${count} unit${count === 1 ? "" : "s"} selected</b>
+      <span>${esc([...offerSelection.values()][0].projectName)}</span>
+    </div>
+    <button class="bar-button bar-clear" id="offer-clear">Clear</button>
+    <button class="bar-button bar-go" id="offer-go">Sales Offer</button>`;
+  document.getElementById("offer-clear").addEventListener("click", () => {
+    offerSelection.clear();
+    document
+      .querySelectorAll(".row.is-selected")
+      .forEach((el) => el.classList.remove("is-selected"));
+    renderOfferBar();
+  });
+  document.getElementById("offer-go").addEventListener("click", openOfferSheet);
+}
+
+function closeSheet() {
+  document.querySelectorAll(".sheet-backdrop").forEach((el) => el.remove());
+}
+
+function sizeText(bytes) {
+  return bytes >= 1048576
+    ? (bytes / 1048576).toFixed(1) + " MB"
+    : Math.max(1, Math.round(bytes / 1024)) + " KB";
+}
+
+async function openOfferSheet() {
+  const units = [...offerSelection.values()];
+  if (!units.length) {
+    return;
+  }
+  const multi = units.length > 1;
+  closeSheet();
+  const backdrop = document.createElement("div");
+  backdrop.className = "sheet-backdrop";
+  backdrop.innerHTML = `<div class="sheet" role="dialog" aria-modal="true"><div id="sheet-body">${loading()}</div></div>`;
+  document.body.appendChild(backdrop);
+  const body = backdrop.querySelector("#sheet-body");
+  let busy = false;
+  backdrop.addEventListener("click", (event) => {
+    if (event.target === backdrop && !busy) {
+      closeSheet();
+    }
+  });
+
+  try {
+    if (!offerOptions) {
+      offerOptions = await get("offers/options");
+    }
+  } catch (error) {
+    body.innerHTML = `${errorBox(error.message)}<button class="button-secondary" id="sheet-close">Close</button>`;
+    body.querySelector("#sheet-close").addEventListener("click", closeSheet);
+    return;
+  }
+  if (!offerOptions.allowed) {
+    body.innerHTML = `${errorBox("Sales offers are not available for your profile.")}<button class="button-secondary" id="sheet-close">Close</button>`;
+    body.querySelector("#sheet-close").addEventListener("click", closeSheet);
+    return;
+  }
+
+  const unitList = units.map((u) => `<li>${esc(u.title)}</li>`).join("");
+  const currencyPicker = multi
+    ? `<label class="field-label" for="offer-currency">Also show prices in (optional)</label>
+       <select class="select" id="offer-currency">
+         <option value="">Project currency only</option>
+         ${(offerOptions.currencies || []).map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join("")}
+       </select>`
+    : "";
+  body.innerHTML = `
+    <h2>${multi ? "Sales Offer for " + units.length + " Units" : "Sales Offer"}</h2>
+    <p class="muted">${esc(units[0].projectName)}</p>
+    <ul class="sheet-units">${unitList}</ul>
+    ${currencyPicker}
+    <div id="sheet-status"></div>
+    <button class="button-primary" id="offer-generate">Generate PDF</button>
+    <button class="button-plain" id="sheet-close">Cancel</button>`;
+  body.querySelector("#sheet-close").addEventListener("click", closeSheet);
+
+  body.querySelector("#offer-generate").addEventListener("click", async () => {
+    const status = body.querySelector("#sheet-status");
+    const currencyEl = body.querySelector("#offer-currency");
+    const request = {
+      unitIds: units.map((u) => u.id),
+      currencyCode: currencyEl ? currencyEl.value : ""
+    };
+    busy = true;
+    body.querySelector("#offer-generate").disabled = true;
+    body.querySelector("#sheet-close").disabled = true;
+    const step = (text) => {
+      status.innerHTML = `<div class="working"><span class="spinner"></span><span>${esc(text)}</span></div>`;
+    };
+    try {
+      step("Preparing…");
+      await post("offers/cleanup", request);
+      step("Generating the PDF…");
+      const result = await post("offers/generate", request);
+      step("Downloading…");
+      const file = await downloadFile(
+        result.contentVersionId,
+        result.fileName,
+        "application/pdf"
+      );
+      busy = false;
+      showOfferResult(body, file, result);
+    } catch (error) {
+      busy = false;
+      if (error instanceof SignedOutError) {
+        closeSheet();
+        handleError(error);
+        return;
+      }
+      status.innerHTML = errorBox(error.message);
+      body.querySelector("#offer-generate").disabled = false;
+      body.querySelector("#offer-generate").textContent = "Try Again";
+      body.querySelector("#sheet-close").disabled = false;
+    }
+  });
+}
+
+function showOfferResult(body, file, result) {
+  const url = URL.createObjectURL(file);
+  const canShare = Boolean(
+    navigator.canShare && navigator.canShare({ files: [file] })
+  );
+  body.innerHTML = `
+    <div class="done-mark">✓</div>
+    <h2>Sales Offer Ready</h2>
+    <p class="muted">${esc(file.name)} · ${sizeText(file.size)}</p>
+    <p class="muted">Saved on the unit in Salesforce as "${esc(result.title)}".</p>
+    ${canShare ? `<button class="button-primary" id="offer-share">Share (WhatsApp, Email…)</button>` : ""}
+    <a class="${canShare ? "button-outline" : "button-primary"} button-link" id="offer-open" href="${url}" target="_blank" rel="noopener">Open PDF</a>
+    <a class="button-outline button-link" href="${url}" download="${esc(file.name)}">Download</a>
+    <button class="button-plain" id="sheet-done">Done</button>`;
+  if (canShare) {
+    body.querySelector("#offer-share").addEventListener("click", async () => {
+      try {
+        await navigator.share({ files: [file], title: file.name });
+      } catch (e) {
+        // the user closed the share sheet
+      }
+    });
+  }
+  body.querySelector("#sheet-done").addEventListener("click", () => {
+    URL.revokeObjectURL(url);
+    offerSelection.clear();
+    document
+      .querySelectorAll(".row.is-selected")
+      .forEach((el) => el.classList.remove("is-selected"));
+    renderOfferBar();
+    closeSheet();
+  });
 }
 
 async function renderUnits(token, params) {
@@ -617,7 +844,16 @@ async function renderUnits(token, params) {
       <select class="select" id="bedrooms">${bedroomOptions}</select>
       <input class="search" id="search" type="search" placeholder="Search unit or building" value="${esc(filters.search)}" />
     </div>
+    <p class="hint">Tap available units to select them for a sales offer.</p>
     <div class="list" id="list"></div>`;
+
+  document.getElementById("list").addEventListener("click", (event) => {
+    const rowEl = event.target.closest(".row.is-selectable");
+    if (rowEl) {
+      toggleOfferUnit(JSON.parse(rowEl.dataset.unit), rowEl);
+    }
+  });
+  renderOfferBar();
 
   const apply = (change) => go("units", { ...filters, ...change });
   document
@@ -680,6 +916,12 @@ async function render() {
     scrollWatcher.disconnect();
     scrollWatcher = null;
   }
+  closeSheet();
+  const oldBar = document.getElementById("offer-bar");
+  if (oldBar) {
+    oldBar.remove();
+  }
+  document.body.classList.remove("has-offer-bar");
   if (!isSignedIn()) {
     renderLogin();
     return;
