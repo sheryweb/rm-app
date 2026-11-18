@@ -110,18 +110,20 @@ const TABS = [
   },
   { path: "deals", label: "Deals", icon: "M4 7h16v13H4zM9 7V4h6v3" },
   {
+    path: "clients",
+    label: "Clients",
+    icon: "M9 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zm-7 9a7 7 0 0 1 14 0zm14-9a3 3 0 1 0 0-6m2 15h4a6 6 0 0 0-6-6"
+  },
+  {
     path: "units",
     label: "Units",
     icon: "M4 21V5l8-3 8 3v16zM9 9h2m2 0h2M9 13h2m2 0h2M9 17h2m2 0h2"
-  },
-  {
-    path: "me",
-    label: "Me",
-    icon: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm8-3a8 8 0 1 1-16 0 8 8 0 0 1 16 0z"
   }
 ];
 
-function shell(title, body, activePath) {
+/** options.back = hash to return to: shows a back arrow instead of the profile button. */
+function shell(title, body, activePath, options) {
+  const back = options && options.back;
   const tabs = TABS.map(
     (tab) => `
       <a class="tab${tab.path === activePath ? " is-active" : ""}" href="#/${tab.path}">
@@ -129,8 +131,16 @@ function shell(title, body, activePath) {
         <span>${tab.label}</span>
       </a>`
   ).join("");
+  const lead = back
+    ? `<a class="icon-button" href="${esc(back)}" aria-label="Back">
+         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>
+       </a>`
+    : `<a class="icon-button avatar-button" href="#/me" aria-label="My profile">${esc(
+        ((me && me.name) || "?").slice(0, 1)
+      )}</a>`;
   root.innerHTML = `
     <header class="topbar">
+      ${lead}
       <h1>${esc(title)}</h1>
       <button class="icon-button" id="refresh" aria-label="Refresh">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.4-5.7M20 4v5h-5"/></svg>
@@ -215,6 +225,25 @@ function infiniteList(listEl, loadPage, renderRow, emptyMessage, token) {
   );
   scrollWatcher.observe(sentinel);
   more();
+}
+
+/** Rows carrying data-open navigate when tapped (links and buttons inside keep working). */
+function openOnTap(listEl) {
+  listEl.addEventListener("click", (event) => {
+    if (event.target.closest("a, button")) {
+      return;
+    }
+    const rowEl = event.target.closest("[data-open]");
+    if (rowEl) {
+      location.hash = rowEl.dataset.open;
+    }
+  });
+}
+
+function field(label, value) {
+  return value === null || value === undefined || value === ""
+    ? ""
+    : `<p class="kv"><span>${esc(label)}</span><b>${esc(value)}</b></p>`;
 }
 
 function handleError(error, target) {
@@ -477,8 +506,9 @@ const DEAL_STEPS = [
 ];
 
 function dealRow(deal) {
+  const opens = deal.kind === "deal";
   return `
-    <article class="row">
+    <article class="row${opens ? " is-link" : ""}"${opens ? ` data-open="#/deal?id=${esc(deal.id)}"` : ""}>
       <div class="row-head">
         <h4>${esc(deal.client || deal.title)}</h4>
         <span class="pill${deal.closed ? " pill-muted" : ""}">${esc(deal.step)}</span>
@@ -519,6 +549,7 @@ function renderDeals(token, params) {
       300
     )
   );
+  openOnTap(document.getElementById("list"));
   infiniteList(
     document.getElementById("list"),
     (offset) => get("deals", { step, search, pageSize: PAGE_SIZE, offset }),
@@ -969,6 +1000,342 @@ async function renderUnits(token, params) {
   );
 }
 
+// ------------------------------------------------------------- deal detail
+
+async function renderDeal(token, params) {
+  shell("Deal", loading(), "deals", { back: "#/deals" });
+  const deal = await get("deals/detail", { id: params.get("id") });
+  if (token !== renderToken) {
+    return;
+  }
+  document.getElementById("screen").innerHTML = `
+    <div class="card">
+      <div class="row-head">
+        <h2 class="detail-title">${esc(deal.client || deal.title)}</h2>
+        <span class="pill">${esc(deal.stage)}</span>
+      </div>
+      <p class="muted">${esc(deal.title)}</p>
+    </div>
+    <div class="card">
+      ${field("Project", deal.project)}
+      ${field("Unit", deal.unit)}
+      ${field("Price", deal.price == null ? "" : money(deal.price, deal.currencyCode))}
+      ${field("Booking date", dateTime12(deal.bookingDate))}
+      ${field("Booking form signed", deal.bookingFormSigned ? "Yes" : "No")}
+      ${field("SPA status", deal.spaStatus)}
+      ${field("Deal owner", deal.ownerName)}
+      ${field("Shared with", deal.sharedWith)}
+      ${field("Created", shortDate(deal.createdDate))}
+    </div>
+    ${
+      deal.clientId
+        ? `<a class="button-outline button-link" href="#/client?id=${esc(deal.clientId)}&from=deal:${esc(deal.id)}">Open Client</a>`
+        : ""
+    }`;
+}
+
+// ------------------------------------------------------------------ clients
+
+const CLIENT_KINDS = [
+  { key: "all", label: "All" },
+  { key: "client", label: "Individuals" },
+  { key: "company", label: "Companies" }
+];
+
+function clientRow(client) {
+  return `
+    <article class="row is-link" data-open="#/client?id=${esc(client.id)}">
+      <div class="row-head">
+        <h4>${esc(client.name)}</h4>
+        <span class="pill ${client.kind === "company" ? "pill-warn" : "pill-info"}">${
+          client.kind === "company" ? "Company" : "Individual"
+        }</span>
+      </div>
+      <p class="muted">${esc([client.mobile, client.email].filter(Boolean).join(" · "))}</p>
+      <p class="muted">${esc([client.country, client.ownerName ? "Owner: " + client.ownerName : ""].filter(Boolean).join(" · "))}</p>
+    </article>`;
+}
+
+function renderClients(token, params) {
+  const kind = params.get("kind") || "all";
+  const search = params.get("search") || "";
+  shell(
+    "Clients",
+    `${chips(CLIENT_KINDS, kind, "kind")}
+     <input class="search" id="search" type="search" placeholder="Search name, phone, email, passport" value="${esc(search)}" />
+     <div class="list" id="list"></div>
+     <a class="fab" href="#/client-new" aria-label="Add client">+ Add Client</a>`,
+    "clients"
+  );
+  root
+    .querySelectorAll("[data-kind]")
+    .forEach((button) =>
+      button.addEventListener("click", () =>
+        go("clients", { kind: button.dataset.kind, search })
+      )
+    );
+  document
+    .getElementById("search")
+    .addEventListener("change", (event) =>
+      go("clients", { kind, search: event.target.value.trim() })
+    );
+  openOnTap(document.getElementById("list"));
+  infiniteList(
+    document.getElementById("list"),
+    (offset) => get("clients", { kind, search, pageSize: PAGE_SIZE, offset }),
+    clientRow,
+    search
+      ? "No clients match this search."
+      : "No clients yet. Tap Add Client to create one.",
+    token
+  );
+}
+
+async function renderClient(token, params) {
+  const from = params.get("from") || "";
+  const back = from.startsWith("deal:")
+    ? "#/deal?id=" + from.slice(5)
+    : "#/clients";
+  shell("Client", loading(), "clients", { back });
+  const client = await get("clients/detail", { id: params.get("id") });
+  if (token !== renderToken) {
+    return;
+  }
+  const company = client.kind === "company";
+  const number = client.mobile || client.phone;
+  const contact = [
+    number ? `<a class="action" href="tel:${esc(number)}">Call</a>` : "",
+    number
+      ? `<a class="action" href="https://wa.me/${esc(String(number).replace(/[^0-9]/g, ""))}" target="_blank" rel="noopener">WhatsApp</a>`
+      : "",
+    client.email
+      ? `<a class="action" href="mailto:${esc(client.email)}">Email</a>`
+      : ""
+  ].join("");
+  const deals = (client.deals || [])
+    .map(
+      (deal) => `
+      <a class="alert-row deal-line" href="#/deal?id=${esc(deal.id)}">
+        <span><b>${esc([deal.project, deal.unit].filter(Boolean).join(" · ") || deal.title)}</b><br /><small>${esc(deal.stage)}</small></span>
+        <span>›</span>
+      </a>`
+    )
+    .join("");
+  document.getElementById("screen").innerHTML = `
+    <div class="card">
+      <div class="row-head">
+        <h2 class="detail-title">${esc(client.name)}</h2>
+        <span class="pill ${company ? "pill-warn" : "pill-info"}">${company ? "Company" : "Individual"}</span>
+      </div>
+      ${contact ? `<div class="actions">${contact}</div>` : ""}
+    </div>
+    <div class="card">
+      ${field(company ? "Company email" : "Email", client.email)}
+      ${field("Mobile", client.mobile)}
+      ${field("Phone", client.phone)}
+      ${
+        company
+          ? field("Trade licence number", client.tradeLicense) +
+            field("Country of incorporation", client.countryOfIncorporation) +
+            field("Signatory", client.signatory)
+          : field("Gender", client.gender) +
+            field("Nationality", client.nationality) +
+            field("Country of residence", client.countryOfResidence) +
+            field("Date of birth", shortDate(client.birthdate)) +
+            field("Passport number", client.passportNo) +
+            field("Passport issued", shortDate(client.passportIssueDate)) +
+            field("Passport expires", shortDate(client.passportExpiryDate))
+      }
+      ${field("Account owner", client.ownerName)}
+      ${field("Added", shortDate(client.createdDate))}
+    </div>
+    <h3 class="section-title">Deals</h3>
+    ${deals ? `<div class="card alert-list">${deals}</div>` : emptyBox("No deals for this client yet.")}`;
+}
+
+// --------------------------------------------------------------- add client
+
+let clientOptions = null;
+
+function inputField(name, label, options) {
+  const o = options || {};
+  return `
+    <label class="form-field">
+      <span>${esc(label)}${o.required ? " *" : ""}</span>
+      <input class="search" name="${name}" type="${o.type || "text"}"${o.required ? " required" : ""}${
+        o.inputmode ? ` inputmode="${o.inputmode}"` : ""
+      }${o.autocomplete ? ` autocomplete="${o.autocomplete}"` : ' autocomplete="off"'}${o.max ? ` max="${o.max}"` : ""} />
+    </label>`;
+}
+
+function selectField(name, label, choices, required) {
+  return `
+    <label class="form-field">
+      <span>${esc(label)}${required ? " *" : ""}</span>
+      <select class="select" name="${name}"${required ? " required" : ""}>
+        <option value="">Select…</option>
+        ${choices.map((c) => `<option value="${esc(c.value)}">${esc(c.label)}</option>`).join("")}
+      </select>
+    </label>`;
+}
+
+async function renderClientNew(token, params) {
+  const kind = params.get("kind") === "company" ? "company" : "client";
+  shell("Add Client", loading(), "clients", { back: "#/clients" });
+  if (!clientOptions) {
+    clientOptions = await get("clients/options");
+  }
+  if (token !== renderToken) {
+    return;
+  }
+  const today = new Date().toISOString().slice(0, 10);
+  const personFields =
+    inputField("firstName", "First name", { autocomplete: "off" }) +
+    inputField("lastName", "Last name", { required: true }) +
+    inputField("email", "Email", {
+      required: true,
+      type: "email",
+      inputmode: "email"
+    }) +
+    inputField("mobile", "Mobile (with country code)", {
+      required: true,
+      type: "tel",
+      inputmode: "tel"
+    }) +
+    selectField("gender", "Gender", clientOptions.genders, false) +
+    selectField("nationality", "Nationality", clientOptions.countries, false) +
+    selectField(
+      "countryOfResidence",
+      "Country of residence",
+      clientOptions.countries,
+      true
+    ) +
+    inputField("birthdate", "Date of birth", {
+      required: true,
+      type: "date",
+      max: today
+    }) +
+    inputField("passportNo", "Passport number", { required: true }) +
+    inputField("passportIssueDate", "Passport issue date", {
+      required: true,
+      type: "date",
+      max: today
+    }) +
+    inputField("passportExpiryDate", "Passport expiry date", {
+      required: true,
+      type: "date"
+    });
+  const companyFields =
+    inputField("companyName", "Company name", { required: true }) +
+    inputField("email", "Company email", {
+      required: true,
+      type: "email",
+      inputmode: "email"
+    }) +
+    inputField("mobile", "Phone (with country code)", {
+      required: true,
+      type: "tel",
+      inputmode: "tel"
+    }) +
+    inputField("tradeLicense", "Trade licence number", { required: true }) +
+    selectField(
+      "countryOfIncorporation",
+      "Country of incorporation",
+      clientOptions.countries,
+      false
+    ) +
+    inputField("signatory", "Signatory name");
+
+  document.getElementById("screen").innerHTML = `
+    ${chips(
+      [
+        { key: "client", label: "Individual" },
+        { key: "company", label: "Company" }
+      ],
+      kind,
+      "newkind"
+    )}
+    <form class="card form" id="client-form" novalidate>
+      ${kind === "company" ? companyFields : personFields}
+      <div id="form-status"></div>
+      <button class="button-primary" type="submit" id="client-save">Save Client</button>
+    </form>
+    <p class="hint">Fields with * are required. The client is saved in Salesforce under your name.</p>`;
+
+  root
+    .querySelectorAll("[data-newkind]")
+    .forEach((button) =>
+      button.addEventListener("click", () =>
+        go("client-new", { kind: button.dataset.newkind })
+      )
+    );
+  const form = document.getElementById("client-form");
+  const status = document.getElementById("form-status");
+  const saveButton = document.getElementById("client-save");
+
+  async function submit(createAnyway) {
+    const missing = [...form.querySelectorAll("[required]")].find(
+      (el) => !el.value.trim()
+    );
+    if (missing) {
+      status.innerHTML = errorBox(
+        missing
+          .closest(".form-field")
+          .querySelector("span")
+          .textContent.replace(" *", "") + " is required."
+      );
+      missing.focus();
+      return;
+    }
+    const payload = { kind, createAnyway };
+    new FormData(form).forEach((value, key) => {
+      payload[key] = String(value).trim();
+    });
+    saveButton.disabled = true;
+    status.innerHTML = `<div class="working"><span class="spinner"></span><span>Saving…</span></div>`;
+    try {
+      const result = await post("clients/create", payload);
+      if (result.created) {
+        toast("Client saved.");
+        location.hash = "#/client?id=" + result.id;
+        return;
+      }
+      // possible duplicates: let the RM open the existing client or create a new one knowingly
+      status.innerHTML = `
+        <div class="notice notice-warn">
+          <b>This client may already exist.</b>
+          ${result.matches
+            .map(
+              (m) => `
+            <a class="alert-row deal-line" href="#/client?id=${esc(m.id)}">
+              <span><b>${esc(m.name)}</b><br /><small>Same ${esc(String(m.matchedOn).toLowerCase())} · ${esc(
+                [m.phone, m.email].filter(Boolean).join(" · ")
+              )}</small></span>
+              <span>Open ›</span>
+            </a>`
+            )
+            .join("")}
+          <button class="button-outline" type="button" id="create-anyway">Create a New Client Anyway</button>
+        </div>`;
+      document
+        .getElementById("create-anyway")
+        .addEventListener("click", () => submit(true));
+    } catch (error) {
+      if (error instanceof SignedOutError) {
+        handleError(error);
+        return;
+      }
+      status.innerHTML = errorBox(error.message);
+    } finally {
+      saveButton.disabled = false;
+    }
+  }
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    submit(false);
+  });
+}
+
 // ----------------------------------------------------------------------- me
 
 function renderMe() {
@@ -985,7 +1352,8 @@ function renderMe() {
        <p class="kv"><span>App version</span><b>${esc(CONFIG.version)}</b></p>
      </div>
      <button class="button-secondary" id="sign-out">Sign out</button>`,
-    "me"
+    "",
+    { back: "#/home" }
   );
   document.getElementById("sign-out").addEventListener("click", async () => {
     await signOut();
@@ -1028,6 +1396,14 @@ async function render() {
       renderDeals(token, params);
     } else if (path === "units") {
       await renderUnits(token, params);
+    } else if (path === "deal") {
+      await renderDeal(token, params);
+    } else if (path === "clients") {
+      renderClients(token, params);
+    } else if (path === "client") {
+      await renderClient(token, params);
+    } else if (path === "client-new") {
+      await renderClientNew(token, params);
     } else if (path === "me") {
       renderMe();
     } else {

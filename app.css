@@ -951,3 +951,103 @@ a.button-primary {
   margin-top: 8px;
   text-align: left;
 }
+
+/* ---------- clients, detail screens, forms ---------- */
+
+.topbar h1 {
+  flex: 1;
+  margin: 0 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+a.icon-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+
+.avatar-button {
+  background: var(--gold);
+  font-weight: 700;
+  font-size: 16px;
+}
+
+.row.is-link {
+  cursor: pointer;
+}
+
+.detail-title {
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.kv b {
+  max-width: 62%;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.deal-line {
+  align-items: center;
+  color: var(--text);
+  font-weight: 400;
+}
+
+.deal-line small {
+  color: var(--muted);
+}
+
+.fab {
+  position: fixed;
+  right: 16px;
+  bottom: calc(var(--tabbar) + env(safe-area-inset-bottom) + 14px);
+  z-index: 6;
+  min-height: 50px;
+  padding: 0 20px;
+  display: flex;
+  align-items: center;
+  border-radius: 999px;
+  background: var(--gold);
+  color: #fff;
+  font-weight: 700;
+  box-shadow: 0 8px 20px rgba(20, 30, 60, 0.28);
+}
+
+.form .search,
+.form .select {
+  margin-bottom: 0;
+}
+
+.form-field {
+  display: block;
+  margin-bottom: 14px;
+}
+
+.form-field span {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.form input[type="date"] {
+  min-height: 46px;
+}
+
+.notice-warn {
+  margin-bottom: 12px;
+  background: var(--warn-bg);
+  color: var(--text);
+  text-align: left;
+}
+
+.notice-warn .button-outline {
+  margin-top: 10px;
+}
+
+.form .notice-error {
+  margin-bottom: 12px;
+}
