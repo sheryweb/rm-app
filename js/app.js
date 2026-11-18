@@ -533,7 +533,6 @@ function renderDeals(token, params) {
 const UNIT_STATUSES = [
   { key: "available", label: "Available" },
   { key: "blocked", label: "Blocked" },
-  { key: "onApproval", label: "On Approval" },
   { key: "booked", label: "Booked" },
   { key: "reserved", label: "Reserved" },
   { key: "sold", label: "Sold" },
@@ -576,6 +575,13 @@ async function renderUnits(token, params) {
     bedrooms: params.get("bedrooms") || "",
     search: params.get("search") || ""
   };
+  // Blocked units are for directors only; On Approval units are shown to nobody.
+  const unitStatuses = UNIT_STATUSES.filter(
+    (option) => option.key !== "blocked" || (me && me.canSeeBlockedUnits)
+  );
+  if (!unitStatuses.some((option) => option.key === filters.status)) {
+    filters.status = "available";
+  }
   shell("Units", loading(), "units");
   const projects = await get("projects");
   if (token !== renderToken) {
@@ -606,7 +612,7 @@ async function renderUnits(token, params) {
 
   document.getElementById("screen").innerHTML = `
     <select class="select" id="project">${projectOptions}</select>
-    ${chips(UNIT_STATUSES, filters.status, "status")}
+    ${chips(unitStatuses, filters.status, "status")}
     <div class="filter-row">
       <select class="select" id="bedrooms">${bedroomOptions}</select>
       <input class="search" id="search" type="search" placeholder="Search unit or building" value="${esc(filters.search)}" />

@@ -225,8 +225,7 @@ p {
   color: var(--ok);
 }
 
-.status-blocked,
-.status-onApproval {
+.status-blocked {
   background: var(--warn-bg);
   color: var(--warn);
 }
