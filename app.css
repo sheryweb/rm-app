@@ -1429,3 +1429,57 @@ a.button-outline {
   font-style: normal;
   color: var(--muted);
 }
+
+/* ---------- approval requests of a deal ---------- */
+
+#requests-box {
+  margin-bottom: 12px;
+}
+
+.pill-ok {
+  background: var(--ok-bg);
+  color: var(--ok);
+}
+
+.request-row {
+  border-top: 1px solid var(--line);
+  padding: 10px 0;
+}
+
+.request-row summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.request-row summary::-webkit-details-marker {
+  display: none;
+}
+
+.request-row summary small,
+.request-steps small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.request-row[open] summary {
+  margin-bottom: 8px;
+}
+
+.request-steps {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  font-size: 14px;
+}
+
+.request-steps li {
+  margin-bottom: 6px;
+}
+
+.request-steps small,
+.request-steps span {
+  display: block;
+}

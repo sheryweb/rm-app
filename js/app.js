@@ -1064,6 +1064,7 @@ async function renderDeal(token, params) {
     </div>
     <div id="buyers-box"></div>
     <div id="booking-form-box"></div>
+    <div id="requests-box"></div>
     ${
       deal.clientId
         ? `<a class="button-outline button-link" href="#/client?id=${esc(deal.clientId)}&from=deal:${esc(deal.id)}">Open Client</a>`
@@ -1071,6 +1072,96 @@ async function renderDeal(token, params) {
     }`;
   buyersBox(deal, token);
   bookingFormBox(deal, token);
+  requestsBox(deal, token);
+}
+
+// ------------------------------------------------ approval requests of a deal
+// The history is the list the "Approval History" component shows on the deal in Salesforce,
+// and Salesforce decides who sees it (the same permission); for anyone else the box is absent.
+
+const REQUEST_STATUS_PILL = {
+  Pending: "pill-warn",
+  "In Process": "pill-warn",
+  Approved: "pill-info",
+  Applied: "pill-ok",
+  Rejected: "pill-urgent",
+  Reverted: "pill-muted",
+  Cancelled: "pill-muted",
+  Draft: "pill-muted"
+};
+
+/** "Registration_Fees__c" is the field's technical name; show it in plain words. */
+function plainFieldName(apiName) {
+  return String(apiName || "")
+    .replace(/__c$/, "")
+    .replace(/_/g, " ")
+    .trim();
+}
+
+function requestCard(r) {
+  const change =
+    r.currentValue || r.requestedValue
+      ? field(
+          plainFieldName(r.fieldToUpdate) || "Change",
+          (r.currentValue || "—") + " → " + (r.requestedValue || "—")
+        )
+      : "";
+  const steps = (r.steps || [])
+    .map(
+      (s) => `
+      <li>
+        <b>${esc(s.action === "Started" ? "Submitted" : s.action)}</b> by ${esc(s.actorName || "—")}
+        <small>${esc(dateTime12(s.actionDate))}</small>
+        ${s.comments ? `<span>${esc(s.comments)}</span>` : ""}
+      </li>`
+    )
+    .join("");
+  return `
+    <details class="request-row">
+      <summary>
+        <span><b>${esc(r.requestType)}</b><br /><small>${esc(r.name)} · ${esc(shortDate(r.createdDate))}</small></span>
+        <span class="pill ${REQUEST_STATUS_PILL[r.status] || ""}">${esc(r.status)}</span>
+      </summary>
+      ${change}
+      ${field("Requested by", r.requesterName)}
+      ${field("Justification", r.justification)}
+      ${
+        r.isReverted
+          ? field("Reverted by", r.revertedByName) +
+            field("Reverted on", dateTime12(r.revertedOn)) +
+            field("Revert reason", r.revertReason)
+          : ""
+      }
+      ${steps ? `<ul class="request-steps">${steps}</ul>` : ""}
+    </details>`;
+}
+
+async function requestsBox(deal, token) {
+  const box = document.getElementById("requests-box");
+  let view;
+  try {
+    view = await get("deals/requests", { id: deal.id });
+  } catch (error) {
+    if (token === renderToken && box) {
+      box.innerHTML = errorBox(
+        "The requests could not be loaded: " + error.message
+      );
+    }
+    return;
+  }
+  if (token !== renderToken || !box || !view.allowed) {
+    return;
+  }
+  const rows = view.requests || [];
+  box.innerHTML = `
+    <div class="card form">
+      <h2 class="form-title">Approval History</h2>
+      ${
+        rows.length
+          ? rows.map(requestCard).join("")
+          : `<p class="muted">No approval requests on this deal yet.</p>`
+      }
+    </div>`;
 }
 
 // ------------------------------------------------------- buyers of a deal
