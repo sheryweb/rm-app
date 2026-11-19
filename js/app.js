@@ -2191,7 +2191,14 @@ async function renderActivity(token, params) {
       (a.editable || []).length
         ? `<a class="button-primary button-link" href="#/activity-edit?id=${esc(a.id)}">Edit Activity</a>`
         : ""
-    }`;
+    }
+    <div class="list-gap">${proofCard([], "Add Photo or File")}</div>`;
+  bindProofCard(a.id, [], () => {
+    toast("Added to the activity.");
+    if (token === renderToken) {
+      render();
+    }
+  });
 }
 
 function readAsBase64(file) {
@@ -2200,6 +2207,93 @@ function readAsBase64(file) {
     reader.onload = () => resolve(String(reader.result).split(",")[1] || "");
     reader.onerror = () => reject(new Error("The file could not be read."));
     reader.readAsDataURL(file);
+  });
+}
+
+/**
+ * Proof of activity, as on the last screen of the Salesforce wizard: take a picture now with
+ * the phone's camera, or pick a picture or file already on the phone. Saved on the activity.
+ */
+function proofCard(added, title) {
+  return `
+    <div class="card form" id="proof-card">
+      <h2 class="form-title">${esc(title)}</h2>
+      <p class="muted">Take a picture of the meeting or briefing, or upload one you already took. It is saved on the activity in Salesforce.</p>
+      <label class="button-primary button-link proof-pick">
+        Take Photo
+        <input type="file" id="proof-camera" accept="image/*" capture="environment" hidden />
+      </label>
+      <label class="button-outline button-link proof-pick below">
+        Upload Photo or File
+        <input type="file" id="proof-input" accept="image/*,application/pdf" multiple hidden />
+      </label>
+      <div id="proof-status"></div>
+      ${
+        added.length
+          ? `<ul class="proof-list">${added.map((name) => `<li>${esc(name)}</li>`).join("")}</ul>`
+          : ""
+      }
+    </div>`;
+}
+
+function bindProofCard(recordId, added, onAdded) {
+  const status = document.getElementById("proof-status");
+  async function add(files, fromCamera) {
+    let done = 0;
+    for (const file of files) {
+      if (file.size > PROOF_MAX_BYTES) {
+        status.innerHTML = errorBox(
+          file.name + " is larger than 15 MB and was not added."
+        );
+        continue;
+      }
+      // a camera picture arrives with a generic name such as image.jpg
+      const extension = (file.name.match(/\.[^.]+$/) || [".jpg"])[0];
+      const title = fromCamera
+        ? "Photo " +
+          new Date().toLocaleString("en-US", {
+            day: "numeric",
+            month: "short",
+            year: "numeric",
+            hour: "numeric",
+            minute: "2-digit",
+            hour12: true
+          })
+        : file.name.replace(/\.[^.]+$/, "");
+      status.innerHTML = `<div class="working"><span class="spinner"></span><span>Adding ${esc(title)}…</span></div>`;
+      try {
+        await change("POST", "sobjects/ContentVersion", {
+          Title: title,
+          PathOnClient: fromCamera ? title + extension : file.name,
+          VersionData: await readAsBase64(file),
+          FirstPublishLocationId: recordId
+        });
+        added.push(title);
+        done += 1;
+        status.innerHTML = "";
+      } catch (error) {
+        if (error instanceof SignedOutError) {
+          handleError(error);
+          return;
+        }
+        status.innerHTML = errorBox(
+          title + " could not be added: " + error.message
+        );
+        break;
+      }
+    }
+    if (done) {
+      onAdded();
+    }
+  }
+  [
+    ["proof-camera", true],
+    ["proof-input", false]
+  ].forEach(([id, fromCamera]) => {
+    const input = document.getElementById(id);
+    if (input) {
+      input.addEventListener("change", () => add([...input.files], fromCamera));
+    }
   });
 }
 
@@ -2543,20 +2637,7 @@ function activityForm(token, options, record) {
         ${targetBar("Inbound this week", saved.weekInbound || 0, saved.inboundTarget || 0)}
         ${targetBar("Outbound this week", saved.weekOutbound || 0, saved.outboundTarget || 0)}
       </div>
-      <div class="card form">
-        <h2 class="form-title">Proof of Activity (optional)</h2>
-        <p class="muted">Add a photo of the meeting or briefing. It is saved on the activity in Salesforce.</p>
-        <label class="button-outline button-link proof-pick">
-          Add Photo or File
-          <input type="file" id="proof-input" accept="image/*,application/pdf" multiple hidden />
-        </label>
-        <div id="proof-status"></div>
-        ${
-          proofs.length
-            ? `<ul class="proof-list">${proofs.map((name) => `<li>${esc(name)}</li>`).join("")}</ul>`
-            : ""
-        }
-      </div>
+      ${proofCard(proofs, "Proof of Activity (optional)")}
       <a class="button-primary button-link" href="#/activity-new" id="another">Record Another Activity</a>
       <a class="button-outline button-link below" href="#/activities">My Activities</a>`;
   }
@@ -2687,41 +2768,6 @@ function activityForm(token, options, record) {
     }
   }
 
-  async function addProofs(files) {
-    const status = document.getElementById("proof-status");
-    for (const file of files) {
-      if (file.size > PROOF_MAX_BYTES) {
-        status.innerHTML = errorBox(
-          file.name + " is larger than 15 MB and was not added."
-        );
-        continue;
-      }
-      status.innerHTML = `<div class="working"><span class="spinner"></span><span>Adding ${esc(file.name)}…</span></div>`;
-      try {
-        await change("POST", "sobjects/ContentVersion", {
-          Title: file.name.replace(/\.[^.]+$/, ""),
-          PathOnClient: file.name,
-          VersionData: await readAsBase64(file),
-          FirstPublishLocationId: saved.recordId
-        });
-        proofs.push(file.name);
-        status.innerHTML = "";
-      } catch (error) {
-        if (error instanceof SignedOutError) {
-          handleError(error);
-          return;
-        }
-        status.innerHTML = errorBox(
-          file.name + " could not be added: " + error.message
-        );
-        return;
-      }
-    }
-    if (token === renderToken) {
-      draw();
-    }
-  }
-
   function bindLookup(key, route) {
     const input = screen.querySelector(`[data-lookup="${key}"]`);
     const results = screen.querySelector(`[data-results="${key}"]`);
@@ -2798,11 +2844,12 @@ function activityForm(token, options, record) {
                 .join("");
       });
     }
-    const proofInput = document.getElementById("proof-input");
-    if (proofInput) {
-      proofInput.addEventListener("change", () =>
-        addProofs([...proofInput.files])
-      );
+    if (document.getElementById("proof-card")) {
+      bindProofCard(saved.recordId, proofs, () => {
+        if (token === renderToken) {
+          draw();
+        }
+      });
     }
   }
 
