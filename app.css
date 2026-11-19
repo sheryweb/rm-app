@@ -1051,3 +1051,64 @@ a.icon-button {
 .form .notice-error {
   margin-bottom: 12px;
 }
+
+/* ---------- record sections (as on the Salesforce page) ---------- */
+
+.record-section {
+  padding: 0 16px;
+}
+
+.record-section summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 0;
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+}
+
+.record-section summary::-webkit-details-marker {
+  display: none;
+}
+
+.record-section summary small {
+  flex: none;
+  font-weight: 400;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.record-section summary small::after {
+  content: "▾";
+  margin-left: 8px;
+}
+
+.record-section[open] summary small::after {
+  content: "▴";
+}
+
+.record-section[open] {
+  padding-bottom: 10px;
+}
+
+.record-section .kv {
+  gap: 12px;
+  border-top: 1px solid var(--line);
+  padding: 9px 0;
+}
+
+.record-section .kv span {
+  flex: 1;
+}
+
+.kv.is-empty b {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.kv .req {
+  color: var(--urgent);
+  font-style: normal;
+}

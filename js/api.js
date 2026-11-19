@@ -82,6 +82,17 @@ export async function post(route, body) {
   return readJson(response);
 }
 
+/**
+ * Reads from Salesforce's own data services (record + page layout) as the signed-in RM, so the
+ * RM gets exactly the fields, labels and records Salesforce itself would show that user.
+ */
+export async function data(path) {
+  const response = await authorized(
+    (base) => base + "/services/data/v62.0/" + path
+  );
+  return readJson(response);
+}
+
 /** Downloads a Salesforce file (by ContentVersion id) with the RM's login; returns a File. */
 export async function downloadFile(contentVersionId, fileName, mimeType) {
   const response = await authorized(

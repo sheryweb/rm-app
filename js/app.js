@@ -6,7 +6,7 @@ import {
   completeLoginIfReturning,
   signOut
 } from "./auth.js";
-import { get, post, downloadFile, SignedOutError } from "./api.js";
+import { get, post, data, downloadFile, SignedOutError } from "./api.js";
 
 const root = document.getElementById("app");
 const PAGE_SIZE = 25;
@@ -1091,13 +1091,177 @@ function renderClients(token, params) {
   );
 }
 
+// ------------------------------------------- a record as Salesforce shows it
+// The sections, fields, labels and order come from the page layout Salesforce gives the
+// signed-in RM, so the app always matches the Salesforce record page; nothing is listed here.
+
+const layoutCache = new Map();
+const SALESFORCE_ID = /^[a-zA-Z0-9]{15}([a-zA-Z0-9]{3})?$/;
+
+async function recordWithLayout(recordId) {
+  if (!SALESFORCE_ID.test(recordId || "")) {
+    throw new Error("This record could not be found.");
+  }
+  const record = await data(
+    "ui-api/records/" + recordId + "?layoutTypes=Full&modes=View"
+  );
+  const key = record.apiName + ":" + (record.recordTypeId || "");
+  if (!layoutCache.has(key)) {
+    layoutCache.set(
+      key,
+      await data(
+        "ui-api/layout/" +
+          record.apiName +
+          "?layoutType=Full&mode=View" +
+          (record.recordTypeId ? "&recordTypeId=" + record.recordTypeId : "")
+      )
+    );
+  }
+  return { record, layout: layoutCache.get(key) };
+}
+
+function layoutValue(record, apiName) {
+  const fields = record.fields || {};
+  const entry = fields[apiName];
+  if (!entry) {
+    return "";
+  }
+  // a lookup shows the name of the record it points to, not its id
+  const relation = apiName.endsWith("__c")
+    ? apiName.slice(0, -1) + "r"
+    : apiName.endsWith("Id")
+      ? apiName.slice(0, -2)
+      : null;
+  if (relation && fields[relation] && fields[relation].displayValue) {
+    return fields[relation].displayValue;
+  }
+  const value = entry.value;
+  if (value === null || value === undefined || value === "") {
+    return "";
+  }
+  if (typeof value === "boolean") {
+    return value ? "Yes" : "No";
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return shortDate(value);
+  }
+  if (/^\d{4}-\d{2}-\d{2}T/.test(value)) {
+    return dateTime12(value);
+  }
+  return entry.displayValue || String(value);
+}
+
+function layoutItemValue(record, item) {
+  const names = item.layoutComponents
+    .filter((part) => part.componentType === "Field" && part.apiName)
+    .map((part) => part.apiName);
+  const isName = names.includes("LastName");
+  return names
+    .map((name) => layoutValue(record, name))
+    .filter(Boolean)
+    .join(isName ? " " : ", ");
+}
+
+/** Salesforce lays a section out in columns; on a phone the left column is read first. */
+function layoutSectionItems(section) {
+  const columns = [];
+  section.layoutRows.forEach((row) => {
+    row.layoutItems.forEach((item, index) => {
+      if (
+        item.layoutComponents.some(
+          (part) => part.componentType === "Field" && part.apiName
+        )
+      ) {
+        (columns[index] = columns[index] || []).push(item);
+      }
+    });
+  });
+  return columns.flat();
+}
+
+function layoutSections(record, layout) {
+  return layout.sections
+    .map((section, index) => {
+      const items = layoutSectionItems(section);
+      if (!items.length) {
+        return "";
+      }
+      let filled = 0;
+      const rows = items
+        .map((item) => {
+          const value = layoutItemValue(record, item);
+          if (value) {
+            filled += 1;
+          }
+          return `<p class="kv${value ? "" : " is-empty"}"><span>${esc(item.label)}${
+            item.required ? ` <i class="req">*</i>` : ""
+          }</span><b>${value ? esc(value) : "—"}</b></p>`;
+        })
+        .join("");
+      return `
+        <details class="card record-section"${index === 0 ? " open" : ""}>
+          <summary>
+            <span>${esc(section.heading)}</span>
+            <small>${filled} of ${items.length} filled</small>
+          </summary>
+          ${rows}
+        </details>`;
+    })
+    .join("");
+}
+
+async function renderContact(token, params) {
+  const clientId = params.get("client") || "";
+  shell("Contact", loading(), "clients", {
+    back: clientId ? "#/client?id=" + clientId : "#/clients"
+  });
+  const { record, layout } = await recordWithLayout(params.get("id"));
+  if (token !== renderToken) {
+    return;
+  }
+  if (record.apiName !== "Contact") {
+    throw new Error("This contact could not be found.");
+  }
+  const name =
+    layoutValue(record, "Name") ||
+    [layoutValue(record, "FirstName"), layoutValue(record, "LastName")]
+      .filter(Boolean)
+      .join(" ");
+  const primary = record.fields.Primary__c && record.fields.Primary__c.value;
+  document.getElementById("screen").innerHTML = `
+    <div class="card">
+      <div class="row-head">
+        <h2 class="detail-title">${esc(name)}</h2>
+        ${primary ? `<span class="pill pill-info">Primary</span>` : ""}
+      </div>
+    </div>
+    ${layoutSections(record, layout)}`;
+}
+
+async function companyContacts(accountId) {
+  if (!SALESFORCE_ID.test(accountId || "")) {
+    return [];
+  }
+  const soql =
+    "SELECT Id, Name, Title, Primary__c FROM Contact WHERE AccountId = '" +
+    accountId +
+    "' ORDER BY Primary__c DESC, Name LIMIT 50";
+  const answer = await data("query?q=" + encodeURIComponent(soql));
+  return answer.records || [];
+}
+
 async function renderClient(token, params) {
   const from = params.get("from") || "";
   const back = from.startsWith("deal:")
     ? "#/deal?id=" + from.slice(5)
     : "#/clients";
   shell("Client", loading(), "clients", { back });
+  // our own service first: it only answers for Client and Company accounts
   const client = await get("clients/detail", { id: params.get("id") });
+  const [{ record, layout }, contacts] = await Promise.all([
+    recordWithLayout(client.id),
+    client.kind === "company" ? companyContacts(client.id) : []
+  ]);
   if (token !== renderToken) {
     return;
   }
@@ -1121,6 +1285,17 @@ async function renderClient(token, params) {
       </a>`
     )
     .join("");
+  const contactLines = contacts
+    .map(
+      (person) => `
+      <a class="alert-row deal-line" href="#/contact?id=${esc(person.Id)}&client=${esc(client.id)}">
+        <span><b>${esc(person.Name)}</b>${person.Primary__c ? ` <span class="pill pill-info">Primary</span>` : ""}${
+          person.Title ? `<br /><small>${esc(person.Title)}</small>` : ""
+        }</span>
+        <span>›</span>
+      </a>`
+    )
+    .join("");
   document.getElementById("screen").innerHTML = `
     <div class="card">
       <div class="row-head">
@@ -1129,26 +1304,16 @@ async function renderClient(token, params) {
       </div>
       ${contact ? `<div class="actions">${contact}</div>` : ""}
     </div>
-    <div class="card">
-      ${field(company ? "Company email" : "Email", client.email)}
-      ${field("Mobile", client.mobile)}
-      ${field("Phone", client.phone)}
-      ${
-        company
-          ? field("Trade licence number", client.tradeLicense) +
-            field("Country of incorporation", client.countryOfIncorporation) +
-            field("Signatory", client.signatory)
-          : field("Gender", client.gender) +
-            field("Nationality", client.nationality) +
-            field("Country of residence", client.countryOfResidence) +
-            field("Date of birth", shortDate(client.birthdate)) +
-            field("Passport number", client.passportNo) +
-            field("Passport issued", shortDate(client.passportIssueDate)) +
-            field("Passport expires", shortDate(client.passportExpiryDate))
-      }
-      ${field("Account owner", client.ownerName)}
-      ${field("Added", shortDate(client.createdDate))}
-    </div>
+    ${layoutSections(record, layout)}
+    ${
+      company
+        ? `<h3 class="section-title">Contacts</h3>${
+            contactLines
+              ? `<div class="card alert-list">${contactLines}</div>`
+              : emptyBox("No contacts on this company yet.")
+          }`
+        : ""
+    }
     <h3 class="section-title">Deals</h3>
     ${deals ? `<div class="card alert-list">${deals}</div>` : emptyBox("No deals for this client yet.")}`;
 }
@@ -1402,6 +1567,8 @@ async function render() {
       renderClients(token, params);
     } else if (path === "client") {
       await renderClient(token, params);
+    } else if (path === "contact") {
+      await renderContact(token, params);
     } else if (path === "client-new") {
       await renderClientNew(token, params);
     } else if (path === "me") {
