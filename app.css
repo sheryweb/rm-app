@@ -1301,3 +1301,7 @@ a.button-outline {
   color: var(--ok);
   font-size: 14px;
 }
+
+.locked-hint {
+  margin: 10px 0 0;
+}

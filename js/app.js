@@ -2067,6 +2067,9 @@ async function renderClientNew(token, params) {
 // ----------------------------------------------------------- sales activities
 // The same steps, wording and rules as the "Record Activity" wizard in Salesforce: the save
 // goes to that wizard's own service, so nothing here decides what is valid.
+// Changing an activity later follows the validation rule on the object: Salesforce tells the app
+// which parts this user may change (an RM: activity, client, outcome, projects), and only those
+// are offered.
 
 const ACTIVITY_COPY = {
   "Client Meeting":
@@ -2088,6 +2091,11 @@ const PROOF_MAX_BYTES = 15 * 1024 * 1024;
 function isoDay(date) {
   const pad = (n) => String(n).padStart(2, "0");
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function clockTime(date) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 function targetBar(label, done, target) {
@@ -2113,7 +2121,7 @@ function activityRow(a) {
         ? ` · ${Math.round((a.minutes / 60) * 10) / 10} h`
         : ` · ${a.minutes} min`;
   return `
-    <article class="row">
+    <article class="row is-link" data-open="#/activity?id=${esc(a.id)}">
       <div class="row-head">
         <h4>${esc(a.activity || a.name)}</h4>
         ${a.activityType ? `<span class="pill pill-info">${esc(a.activityType)}</span>` : ""}
@@ -2133,6 +2141,7 @@ function renderActivities(token) {
     "home",
     { back: "#/home" }
   );
+  openOnTap(document.getElementById("list"));
   infiniteList(
     document.getElementById("list"),
     (offset) => get("activities", { pageSize: PAGE_SIZE, offset }),
@@ -2140,6 +2149,44 @@ function renderActivities(token) {
     "You have not recorded any activity yet.",
     token
   );
+}
+
+async function renderActivity(token, params) {
+  shell("Activity", loading(), "home", { back: "#/activities" });
+  const a = await get("activities/detail", { id: params.get("id") });
+  if (token !== renderToken) {
+    return;
+  }
+  const projects = (a.projectsDiscussed || []).join(", ");
+  document.getElementById("screen").innerHTML = `
+    <div class="card">
+      <div class="row-head">
+        <h2 class="detail-title">${esc(a.activity || a.name)}</h2>
+        ${a.activityType ? `<span class="pill pill-info">${esc(a.activityType)}</span>` : ""}
+      </div>
+      <p class="muted">${esc(a.name)}</p>
+    </div>
+    <div class="card">
+      ${field("Agency", a.agency || "Not Registered Agency")}
+      ${field("Client", a.client)}
+      ${field("Started", dateTime12(a.startDateTime))}
+      ${field("Ended", dateTime12(a.endDateTime))}
+      ${field("Time spent", a.timeSpent)}
+      ${field("Number of agents", a.numberOfAgents)}
+      ${field("Other RMs who attended", (a.rmsAttended || []).join(", "))}
+      ${field("Projects discussed", projects)}
+      ${field("Other project", a.otherProject)}
+      ${field("How it went", a.outcome)}
+      ${field("What was discussed", a.description)}
+      ${field("RM", a.rmName)}
+      ${field("Line manager", a.lineManager)}
+      ${field("Photos and files", a.files ? String(a.files) : "")}
+    </div>
+    ${
+      (a.editable || []).length
+        ? `<a class="button-primary button-link" href="#/activity-edit?id=${esc(a.id)}">Edit Activity</a>`
+        : ""
+    }`;
 }
 
 function readAsBase64(file) {
@@ -2157,26 +2204,65 @@ async function renderActivityNew(token) {
   if (token !== renderToken) {
     return;
   }
+  activityForm(token, options, null);
+}
+
+async function renderActivityEdit(token, params) {
+  const id = params.get("id");
+  shell("Edit Activity", loading(), "home", { back: "#/activity?id=" + id });
+  const [options, record] = await Promise.all([
+    get("activities/options"),
+    get("activities/detail", { id })
+  ]);
+  if (token !== renderToken) {
+    return;
+  }
+  if (!(record.editable || []).length) {
+    throw new Error("You cannot change this activity.");
+  }
+  activityForm(token, options, record);
+}
+
+/** The Record Activity form; with `record` it edits that activity instead. */
+function activityForm(token, options, record) {
+  const editing = !!record;
+  const can = (part) => !editing || record.editable.includes(part);
   const screen = document.getElementById("screen");
   const followDefault = new Date();
   followDefault.setDate(followDefault.getDate() + 3);
+  const started =
+    editing && record.startDateTime ? new Date(record.startDateTime) : null;
+  const ended =
+    editing && record.endDateTime ? new Date(record.endDateTime) : null;
+  // times that cannot be shown as "one day, start and end" are left exactly as they are
+  const keepWhen =
+    editing && (!started || !ended || isoDay(started) !== isoDay(ended));
   const state = {
-    step: 1,
-    activity: null,
-    type: options.defaultType || null,
-    agency: null,
-    notRegistered: false,
-    client: null,
-    agents: "",
-    rms: [],
-    projects: [],
-    otherProject: "",
-    description: "",
-    outcome: null,
-    date: isoDay(new Date()),
-    startTime: "10:00",
-    duration: 60,
-    customEnd: "",
+    step: editing ? "edit" : 1,
+    activity: editing ? record.activity : null,
+    type: editing ? record.activityType : options.defaultType || null,
+    agency:
+      editing && record.agencyId
+        ? { id: record.agencyId, name: record.agency }
+        : null,
+    notRegistered: editing && !record.agencyId,
+    client:
+      editing && record.clientId
+        ? { id: record.clientId, name: record.client }
+        : null,
+    agents:
+      editing && record.numberOfAgents != null
+        ? String(record.numberOfAgents)
+        : "",
+    rms: editing ? [...(record.rmsAttended || [])] : [],
+    projects: editing ? [...(record.projectsDiscussed || [])] : [],
+    otherProject: (editing && record.otherProject) || "",
+    description: (editing && record.description) || "",
+    outcome: editing ? record.outcome : null,
+    date: started ? isoDay(started) : isoDay(new Date()),
+    startTime: started ? clockTime(started) : "10:00",
+    duration: editing ? "custom" : 60,
+    customEnd: ended ? clockTime(ended) : "",
     followUp: false,
     followUpDate: isoDay(followDefault),
     followUpNote: "",
@@ -2206,6 +2292,131 @@ async function renderActivityNew(token) {
       }
     </div>`;
 
+  // ---- the parts of the form; each one is left out when this user may not change it
+  const partActivity = () =>
+    can("activity")
+      ? `<div class="form-field">
+           <span>Activity *</span>
+           ${chipRow(options.activities || [], (v) => v === state.activity, "activity")}
+         </div>`
+      : "";
+  const partType = () =>
+    can("type")
+      ? `<div class="form-field">
+           <span>How was it held? *</span>
+           ${chipRow(options.types || [], (v) => v === state.type, "type")}
+         </div>`
+      : "";
+  const partAgency = () =>
+    can("agency")
+      ? `${lookup(
+          "agency",
+          `Agency${state.notRegistered ? "" : " *"}`,
+          state.notRegistered ? null : state.agency,
+          state.notRegistered ? "Not a registered agency" : "Search agencies…",
+          state.notRegistered
+        )}
+        <label class="form-check">
+          <input type="checkbox" id="not-registered"${state.notRegistered ? " checked" : ""} />
+          <span>Not Registered Agency</span>
+        </label>`
+      : "";
+  const partClient = () =>
+    can("client")
+      ? lookup(
+          "client",
+          "Client (optional)",
+          state.client,
+          "Search clients…",
+          false
+        )
+      : "";
+  const partAgents = () =>
+    can("agents")
+      ? `<label class="form-field">
+           <span>${isBriefing() ? "Number of agents briefed *" : "Number of agents present (optional)"}</span>
+           <input class="search" type="text" inputmode="numeric" data-bind="agents" value="${esc(state.agents)}" autocomplete="off" />
+         </label>`
+      : "";
+  const partRms = () =>
+    can("rms")
+      ? `<div class="form-field">
+           <span>Other RMs who attended (optional)</span>
+           <input class="search" type="search" id="rm-search" placeholder="Type a name…" autocomplete="off" />
+           <div class="lookup-results" id="rm-results"></div>
+           ${
+             state.rms.length
+               ? `<div class="chips chips-wrap">${state.rms
+                   .map(
+                     (name) =>
+                       `<button type="button" class="chip is-active" data-rm-remove="${esc(name)}">${esc(name)} ✕</button>`
+                   )
+                   .join("")}</div>`
+               : ""
+           }
+         </div>`
+      : "";
+  const partProjects = () =>
+    can("projects")
+      ? `<div class="form-field">
+           <span>Projects discussed (optional)</span>
+           ${chipRow(options.projectNames || [], (v) => state.projects.includes(v), "project")}
+           ${
+             otherPicked()
+               ? `<input class="search other-project" type="text" maxlength="100" data-bind="otherProject" placeholder="Which project?" value="${esc(state.otherProject)}" autocomplete="off" />`
+               : ""
+           }
+         </div>`
+      : "";
+  const partDescription = () =>
+    can("description")
+      ? `<label class="form-field">
+           <span>What was discussed? (optional)</span>
+           <textarea class="search" rows="3" maxlength="255" data-bind="description" placeholder="${
+             isBriefing()
+               ? "What was presented? Projects covered, agent questions, agreed follow-ups…"
+               : "What was discussed? Client interest, units shown, objections, next step…"
+           }">${esc(state.description)}</textarea>
+         </label>`
+      : "";
+  const partOutcome = () =>
+    can("outcome")
+      ? `<div class="form-field">
+           <span>How did it go? *</span>
+           ${chipRow(options.outcomes || [], (v) => v === state.outcome, "outcome")}
+         </div>`
+      : "";
+  const partWhen = () =>
+    can("when") && !keepWhen
+      ? `<label class="form-field">
+           <span>Date *</span>
+           <input class="search" type="date" data-bind="date" max="${isoDay(new Date())}" value="${esc(state.date)}" />
+         </label>
+         <label class="form-field">
+           <span>Start time *</span>
+           <input class="search" type="time" data-bind="startTime" value="${esc(state.startTime)}" />
+         </label>
+         ${
+           editing
+             ? ""
+             : `<div class="form-field">
+                  <span>How long did it take? *</span>
+                  <div class="chips chips-wrap">${DURATIONS.map(
+                    (d) =>
+                      `<button type="button" class="chip${d.value === state.duration ? " is-active" : ""}" data-duration="${d.value}">${d.label}</button>`
+                  ).join("")}</div>
+                </div>`
+         }
+         ${
+           state.duration === "custom"
+             ? `<label class="form-field">
+                  <span>End time *</span>
+                  <input class="search" type="time" data-bind="customEnd" value="${esc(state.customEnd)}" />
+                </label>`
+             : ""
+         }`
+      : "";
+
   function stepOne() {
     return `
       <div class="card">
@@ -2229,62 +2440,7 @@ async function renderActivityNew(token) {
     return `
       <p class="step-line">Step 2 of 3 · ${esc(state.activity)}</p>
       <div class="card form">
-        <div class="form-field">
-          <span>How was it held? *</span>
-          ${chipRow(options.types || [], (v) => v === state.type, "type")}
-        </div>
-        ${lookup(
-          "agency",
-          `Agency${state.notRegistered ? "" : " *"}`,
-          state.notRegistered ? null : state.agency,
-          state.notRegistered ? "Not a registered agency" : "Search agencies…",
-          state.notRegistered
-        )}
-        <label class="form-check">
-          <input type="checkbox" id="not-registered"${state.notRegistered ? " checked" : ""} />
-          <span>Not Registered Agency</span>
-        </label>
-        ${lookup("client", "Client (optional)", state.client, "Search clients…", false)}
-        <label class="form-field">
-          <span>${isBriefing() ? "Number of agents briefed *" : "Number of agents present (optional)"}</span>
-          <input class="search" type="text" inputmode="numeric" data-bind="agents" value="${esc(state.agents)}" autocomplete="off" />
-        </label>
-        <div class="form-field">
-          <span>Other RMs who attended (optional)</span>
-          <input class="search" type="search" id="rm-search" placeholder="Type a name…" autocomplete="off" />
-          <div class="lookup-results" id="rm-results"></div>
-          ${
-            state.rms.length
-              ? `<div class="chips chips-wrap">${state.rms
-                  .map(
-                    (name) =>
-                      `<button type="button" class="chip is-active" data-rm-remove="${esc(name)}">${esc(name)} ✕</button>`
-                  )
-                  .join("")}</div>`
-              : ""
-          }
-        </div>
-        <div class="form-field">
-          <span>Projects discussed (optional)</span>
-          ${chipRow(options.projectNames || [], (v) => state.projects.includes(v), "project")}
-          ${
-            otherPicked()
-              ? `<input class="search other-project" type="text" maxlength="100" data-bind="otherProject" placeholder="Which project?" value="${esc(state.otherProject)}" autocomplete="off" />`
-              : ""
-          }
-        </div>
-        <label class="form-field">
-          <span>What was discussed? (optional)</span>
-          <textarea class="search" rows="3" maxlength="255" data-bind="description" placeholder="${
-            isBriefing()
-              ? "What was presented? Projects covered, agent questions, agreed follow-ups…"
-              : "What was discussed? Client interest, units shown, objections, next step…"
-          }">${esc(state.description)}</textarea>
-        </label>
-        <div class="form-field">
-          <span>How did it go? *</span>
-          ${chipRow(options.outcomes || [], (v) => v === state.outcome, "outcome")}
-        </div>
+        ${partType()}${partAgency()}${partClient()}${partAgents()}${partRms()}${partProjects()}${partDescription()}${partOutcome()}
         <div id="form-status">${state.error ? errorBox(state.error) : ""}</div>
         <button type="button" class="button-primary" id="to-when">Continue</button>
         <button type="button" class="button-outline" data-step="1">Back</button>
@@ -2295,29 +2451,7 @@ async function renderActivityNew(token) {
     return `
       <p class="step-line">Step 3 of 3 · When did it happen?</p>
       <div class="card form">
-        <label class="form-field">
-          <span>Date *</span>
-          <input class="search" type="date" data-bind="date" max="${isoDay(new Date())}" value="${esc(state.date)}" />
-        </label>
-        <label class="form-field">
-          <span>Start time *</span>
-          <input class="search" type="time" data-bind="startTime" value="${esc(state.startTime)}" />
-        </label>
-        <div class="form-field">
-          <span>How long did it take? *</span>
-          <div class="chips chips-wrap">${DURATIONS.map(
-            (d) =>
-              `<button type="button" class="chip${d.value === state.duration ? " is-active" : ""}" data-duration="${d.value}">${d.label}</button>`
-          ).join("")}</div>
-        </div>
-        ${
-          state.duration === "custom"
-            ? `<label class="form-field">
-                 <span>End time *</span>
-                 <input class="search" type="time" data-bind="customEnd" value="${esc(state.customEnd)}" />
-               </label>`
-            : ""
-        }
+        ${partWhen()}
         <label class="form-check">
           <input type="checkbox" id="follow-up"${state.followUp ? " checked" : ""} />
           <span>Schedule a follow-up task for yourself</span>
@@ -2338,6 +2472,47 @@ async function renderActivityNew(token) {
         <button type="button" class="button-primary" id="save-activity">Save Activity</button>
         <button type="button" class="button-outline" data-step="2">Back</button>
       </div>`;
+  }
+
+  /** What this user may not change, shown as it is. */
+  function lockedCard() {
+    const rows = [
+      can("type") ? "" : field("How it was held", record.activityType),
+      can("agency")
+        ? ""
+        : field("Agency", record.agency || "Not Registered Agency"),
+      can("when") && !keepWhen
+        ? ""
+        : field("Started", dateTime12(record.startDateTime)) +
+          field("Ended", dateTime12(record.endDateTime)),
+      can("agents") ? "" : field("Number of agents", record.numberOfAgents),
+      can("rms")
+        ? ""
+        : field(
+            "Other RMs who attended",
+            (record.rmsAttended || []).join(", ")
+          ),
+      can("description") ? "" : field("What was discussed", record.description)
+    ].join("");
+    return rows
+      ? `<div class="card">
+           <h2 class="form-title">Cannot Be Changed Here</h2>
+           ${rows}
+           <p class="muted locked-hint">Please contact your Line Manager for any change to these details.</p>
+         </div>`
+      : "";
+  }
+
+  function editScreen() {
+    return `
+      <div class="card form">
+        <h2 class="form-title">${esc(record.name)}</h2>
+        ${partActivity()}${partType()}${partAgency()}${partClient()}${partWhen()}${partAgents()}${partRms()}${partProjects()}${partDescription()}${partOutcome()}
+        <div id="form-status">${state.error ? errorBox(state.error) : ""}</div>
+        <button type="button" class="button-primary" id="save-activity">Save Changes</button>
+        <a class="button-outline button-link" href="#/activity?id=${esc(record.id)}">Cancel</a>
+      </div>
+      ${lockedCard()}`;
   }
 
   function done() {
@@ -2382,29 +2557,41 @@ async function renderActivityNew(token) {
   }
 
   function validateDetails() {
-    if (!state.type) {
+    if (can("activity") && !state.activity) {
+      return "Please choose the activity.";
+    }
+    if (can("type") && !state.type) {
       return "Please choose how it was held.";
     }
-    if (!state.notRegistered && !state.agency) {
+    if (can("agency") && !state.notRegistered && !state.agency) {
       return 'Please select the agency, or tick "Not Registered Agency".';
     }
-    const agents = state.agents.trim();
-    if (agents && !/^\d{1,5}$/.test(agents)) {
-      return "The number of agents must be a whole number.";
+    if (can("agents")) {
+      const agents = state.agents.trim();
+      if (agents && !/^\d{1,5}$/.test(agents)) {
+        return "The number of agents must be a whole number.";
+      }
+      if (isBriefing() && (!agents || Number(agents) < 1)) {
+        return "Please enter how many agents attended the briefing.";
+      }
     }
-    if (isBriefing() && (!agents || Number(agents) < 1)) {
-      return "Please enter how many agents attended the briefing.";
-    }
-    if (otherPicked() && !state.otherProject.trim()) {
+    if (can("projects") && otherPicked() && !state.otherProject.trim()) {
       return "Please name the project you discussed that is not in the list.";
     }
-    if (!state.outcome) {
+    if (can("outcome") && !state.outcome) {
       return "Please pick an outcome: how did it go?";
     }
     return "";
   }
 
   function times() {
+    if (editing && (!can("when") || keepWhen)) {
+      // not this user's to change: send back exactly what is stored
+      return {
+        start: record.startDateTime ? new Date(record.startDateTime) : null,
+        end: record.endDateTime ? new Date(record.endDateTime) : null
+      };
+    }
     if (!state.date || !state.startTime) {
       throw new Error("Please set the date and the start time.");
     }
@@ -2435,6 +2622,12 @@ async function renderActivityNew(token) {
   async function save() {
     let when;
     try {
+      if (editing) {
+        const problem = validateDetails();
+        if (problem) {
+          throw new Error(problem);
+        }
+      }
       when = times();
       if (state.followUp && !state.followUpDate) {
         throw new Error("Please set the follow-up date.");
@@ -2448,21 +2641,30 @@ async function renderActivityNew(token) {
     button.disabled = true;
     document.getElementById("form-status").innerHTML =
       `<div class="working"><span class="spinner"></span><span>Saving…</span></div>`;
+    const payload = {
+      activity: state.activity,
+      activityType: state.type,
+      agencyId: state.notRegistered || !state.agency ? null : state.agency.id,
+      notRegisteredAgency: state.notRegistered,
+      clientId: state.client ? state.client.id : null,
+      description: state.description,
+      startDateTime: when.start ? when.start.toISOString() : null,
+      endDateTime: when.end ? when.end.toISOString() : null,
+      numberOfAgents: state.agents.trim() ? Number(state.agents) : null,
+      rmsAttended: state.rms,
+      outcome: state.outcome,
+      projectsDiscussed: state.projects,
+      otherProject: state.otherProject
+    };
     try {
+      if (editing) {
+        await post("activities/update", { id: record.id, ...payload });
+        toast("Activity saved.");
+        location.hash = "#/activity?id=" + record.id;
+        return;
+      }
       saved = await post("activities/save", {
-        activity: state.activity,
-        activityType: state.type,
-        agencyId: state.notRegistered || !state.agency ? null : state.agency.id,
-        notRegisteredAgency: state.notRegistered,
-        clientId: state.client ? state.client.id : null,
-        description: state.description,
-        startDateTime: when.start.toISOString(),
-        endDateTime: when.end.toISOString(),
-        numberOfAgents: state.agents.trim() ? Number(state.agents) : null,
-        rmsAttended: state.rms,
-        outcome: state.outcome,
-        projectsDiscussed: state.projects,
-        otherProject: state.otherProject,
+        ...payload,
         followUpDate: state.followUp ? state.followUpDate : "",
         followUpNote: state.followUp ? state.followUpNote : ""
       });
@@ -2553,13 +2755,15 @@ async function renderActivityNew(token) {
 
   function draw() {
     screen.innerHTML =
-      state.step === 1
-        ? stepOne()
-        : state.step === 2
-          ? stepTwo()
-          : state.step === 3
-            ? stepThree()
-            : done();
+      state.step === "edit"
+        ? editScreen()
+        : state.step === 1
+          ? stepOne()
+          : state.step === 2
+            ? stepTwo()
+            : state.step === 3
+              ? stepThree()
+              : done();
     // typed values are kept as they are typed, so a redraw never loses them
     screen.querySelectorAll("[data-bind]").forEach((el) =>
       el.addEventListener("input", () => {
@@ -2607,6 +2811,12 @@ async function renderActivityNew(token) {
     }
   });
   screen.addEventListener("click", (event) => {
+    if (event.target.id === "another") {
+      // "Record Another Activity" is the same address, so start over by hand
+      event.preventDefault();
+      render();
+      return;
+    }
     const el = event.target.closest("button");
     if (!el || !screen.contains(el)) {
       return;
@@ -2614,8 +2824,10 @@ async function renderActivityNew(token) {
     const d = el.dataset;
     if (d.activity) {
       state.activity = d.activity;
-      state.step = 2;
-      window.scrollTo(0, 0);
+      if (!editing) {
+        state.step = 2;
+        window.scrollTo(0, 0);
+      }
     } else if (d.type) {
       state.type = d.type;
     } else if (d.outcome) {
@@ -2650,17 +2862,10 @@ async function renderActivityNew(token) {
     } else {
       return;
     }
-    if (d.type || d.outcome || d.project || d.duration) {
+    if (d.activity || d.type || d.outcome || d.project || d.duration) {
       state.error = "";
     }
     draw();
-  });
-  document.getElementById("screen").addEventListener("click", (event) => {
-    // "Record Another Activity" is the same address, so start over by hand
-    if (event.target.id === "another") {
-      event.preventDefault();
-      render();
-    }
   });
   draw();
 }
@@ -2741,6 +2946,10 @@ async function render() {
       renderActivities(token);
     } else if (path === "activity-new") {
       await renderActivityNew(token);
+    } else if (path === "activity-edit") {
+      await renderActivityEdit(token, params);
+    } else if (path === "activity") {
+      await renderActivity(token, params);
     } else if (path === "client-new") {
       await renderClientNew(token, params);
     } else if (path === "me") {
