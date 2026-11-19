@@ -1514,3 +1514,9 @@ a.button-outline {
 .request-row .button-outline {
   margin-top: 10px;
 }
+
+.price-preview {
+  margin-bottom: 14px;
+  background: var(--info-bg);
+  color: var(--text);
+}

@@ -1079,6 +1079,7 @@ async function renderDeal(token, params) {
         : `<div class="card form">
              <h2 class="form-title">Raise a Request</h2>
              <a class="button-outline button-link" href="#/request-dld?deal=${esc(deal.id)}">DLD Waiver Request</a>
+             <a class="button-outline button-link below" href="#/request-price?deal=${esc(deal.id)}">Unit Price Change</a>
            </div>`
     }
     <div id="requests-box"></div>
@@ -1483,6 +1484,130 @@ async function renderApproval(token, params) {
     }
   });
   draw();
+}
+
+async function renderRequestPrice(token, params) {
+  const dealId = params.get("deal");
+  const back = "#/deal?id=" + dealId;
+  shell("Unit Price Change", loading(), "deals", { back });
+  const view = await get("requests/unitprice", { dealId });
+  if (token !== renderToken) {
+    return;
+  }
+  const info = view.info || {};
+  const screen = document.getElementById("screen");
+  const summary = `
+    <div class="card">
+      ${field("Unit", info.unitTitle)}
+      ${field("Project", info.projectName)}
+      ${field("Unit status", info.unitStatus)}
+      ${field("Price now", info.currentPrice == null ? "" : money(info.currentPrice, info.currencyCode))}
+    </div>`;
+
+  if (view.open) {
+    screen.innerHTML =
+      summary +
+      openRequestNote(
+        "Unit price change request",
+        view.open,
+        field(
+          "Requested price",
+          money(view.open.requestedPrice, view.open.currencyCode)
+        )
+      );
+    return;
+  }
+  if (view.reason) {
+    screen.innerHTML = summary + errorBox(view.reason);
+    return;
+  }
+  if (info.currentPrice == null) {
+    screen.innerHTML =
+      summary +
+      errorBox(
+        "This unit has no price in Salesforce, so a discount cannot be worked out."
+      );
+    return;
+  }
+
+  // the same arithmetic as Salesforce: whole amounts, rounded half up
+  const discounted = (percent) =>
+    Math.round(info.currentPrice * (1 - percent / 100));
+  const hasManager = Boolean(view.lineManager);
+  screen.innerHTML = `
+    ${summary}
+    <form class="card form" id="request-form" novalidate>
+      <label class="form-field">
+        <span>Discount *</span>
+        <select class="select" id="request-discount">
+          <option value="">Select a discount (1 to 10%)</option>
+          ${(view.discounts || [])
+            .map(
+              (percent) =>
+                `<option value="${percent}">${percent}%  →  ${esc(money(discounted(percent), info.currencyCode))}</option>`
+            )
+            .join("")}
+        </select>
+      </label>
+      <div id="price-preview"></div>
+      <label class="form-field">
+        <span>Justification * (at least 10 characters)</span>
+        <textarea class="search" rows="4" id="request-justification" maxlength="2000" placeholder="Why should the price change?"></textarea>
+      </label>
+      ${approverPart({ lineManager: view.lineManager })}
+      <div id="form-status"></div>
+      ${hasManager ? `<button class="button-primary" type="submit" id="request-submit">Submit for Approval</button>` : ""}
+      <a class="button-outline button-link" href="${esc(back)}">Cancel</a>
+    </form>`;
+
+  const form = document.getElementById("request-form");
+  const status = document.getElementById("form-status");
+  const select = document.getElementById("request-discount");
+  select.addEventListener("change", () => {
+    const percent = Number(select.value);
+    document.getElementById("price-preview").innerHTML = percent
+      ? `<div class="notice notice-left price-preview">
+           ${field("Price now", money(info.currentPrice, info.currencyCode))}
+           ${field("Requested price", money(discounted(percent), info.currencyCode))}
+           ${field("Difference", money(info.currentPrice - discounted(percent), info.currencyCode))}
+         </div>`
+      : "";
+  });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const percent = Number(select.value);
+    const justification = document
+      .getElementById("request-justification")
+      .value.trim();
+    const problem = !percent
+      ? "Please choose the discount."
+      : justification.length < 10
+        ? "Please write a justification of at least 10 characters."
+        : "";
+    if (problem) {
+      status.innerHTML = errorBox(problem);
+      return;
+    }
+    const button = document.getElementById("request-submit");
+    button.disabled = true;
+    status.innerHTML = `<div class="working"><span class="spinner"></span><span>Submitting…</span></div>`;
+    try {
+      await post("requests/unitprice/submit", {
+        dealId,
+        discountPercent: percent,
+        justification
+      });
+      toast("Unit price change request submitted.");
+      location.hash = back;
+    } catch (error) {
+      if (error instanceof SignedOutError) {
+        handleError(error);
+        return;
+      }
+      status.innerHTML = errorBox(error.message);
+      button.disabled = false;
+    }
+  });
 }
 
 async function requestsBox(deal, token) {
@@ -4231,6 +4356,8 @@ async function render() {
       await renderApprovals(token);
     } else if (path === "approval") {
       await renderApproval(token, params);
+    } else if (path === "request-price") {
+      await renderRequestPrice(token, params);
     } else if (path === "request-dld") {
       await renderRequestDld(token, params);
     } else if (path === "deal-owners") {
