@@ -1172,7 +1172,7 @@ function openRequestNote(title, open, extraRows) {
  */
 function approverPart(view) {
   if (view.selfApprover) {
-    return `<p class="muted">As a Sales Director, <b>you are the first approver</b> of this request. After you submit it, approve it in My Approvals and it goes on to the next approver.</p>`;
+    return `<p class="muted">As a Sales Director, <b>you are the first approver</b> of this request. Your approval is recorded automatically when you submit, and the request goes straight to the next approver.</p>`;
   }
   if (view.approvers) {
     return `

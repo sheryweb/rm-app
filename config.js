@@ -2,7 +2,7 @@
 // (the login uses PKCE), and every call is made with the signed-in RM's own Salesforce login.
 export const CONFIG = {
   appName: "MIRA RM",
-  version: "0.14.2",
+  version: "0.14.3",
   environment: "Sandbox",
   loginUrl: "https://miradevelopments--working.sandbox.my.salesforce.com",
   clientId:
