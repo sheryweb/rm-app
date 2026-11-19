@@ -302,7 +302,11 @@ const TONE_CLASS = {
 
 async function renderHome(token) {
   shell("My Dashboard", loading(), "home");
-  const data = await get("dashboard");
+  // the approvals count must never stop the dashboard from showing
+  const [data, waiting] = await Promise.all([
+    get("dashboard"),
+    get("approvals").catch(() => [])
+  ]);
   if (token !== renderToken) {
     return;
   }
@@ -391,6 +395,11 @@ async function renderHome(token) {
       <span>${new Date().toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long" })}</span>
     </section>
 
+    ${
+      waiting.length
+        ? `<a class="alert-row approvals-alert" href="#/approvals"><b>${waiting.length} request${waiting.length === 1 ? "" : "s"} waiting for your approval</b><span>›</span></a>`
+        : ""
+    }
     <div class="quick-actions">
       <a class="button-primary button-link" href="#/activity-new">Record Activity</a>
       <a class="button-outline button-link" href="#/client-new">Add Client</a>
@@ -1141,6 +1150,7 @@ function requestCard(r) {
           : ""
       }
       ${steps ? `<ul class="request-steps">${steps}</ul>` : ""}
+      <a class="button-outline button-link" href="#/approval?id=${esc(r.id)}">Open Request</a>
     </details>`;
 }
 
@@ -1285,6 +1295,194 @@ async function renderRequestDld(token, params) {
       button.disabled = false;
     }
   });
+}
+
+function approvalRow(r) {
+  return `
+    <article class="row is-link" data-open="#/approval?id=${esc(r.id)}">
+      <div class="row-head">
+        <h4>${esc(r.requestType)}</h4>
+        <span class="pill pill-warn">Waiting</span>
+      </div>
+      <p class="muted">${esc([r.subject, r.name].filter(Boolean).join(" · "))}</p>
+      ${r.change ? `<p class="muted">${esc(r.change)}</p>` : ""}
+      <p class="muted">From ${esc(r.requester || "—")} · ${esc(dateTime12(r.submitted))}</p>
+    </article>`;
+}
+
+async function renderApprovals(token) {
+  shell("My Approvals", loading(), "home", { back: "#/home" });
+  const rows = await get("approvals");
+  if (token !== renderToken) {
+    return;
+  }
+  const screen = document.getElementById("screen");
+  screen.innerHTML = rows.length
+    ? `<div class="list" id="list">${rows.map(approvalRow).join("")}</div>
+       <p class="end">End of list</p>`
+    : emptyBox("Nothing is waiting for your approval.");
+  const list = document.getElementById("list");
+  if (list) {
+    openOnTap(list);
+  }
+}
+
+async function renderApproval(token, params) {
+  const id = params.get("id");
+  shell("Request", loading(), "home", { back: "#/approvals" });
+  let r = await get("approvals/detail", { id });
+  if (token !== renderToken) {
+    return;
+  }
+  const screen = document.getElementById("screen");
+  let note = "";
+
+  function draw() {
+    const price =
+      r.currentPrice != null || r.requestedPrice != null
+        ? field(
+            "Price",
+            money(r.currentPrice, r.priceCurrency) +
+              " → " +
+              money(r.requestedPrice, r.priceCurrency)
+          ) +
+          field(
+            "Discount",
+            r.discountPercent == null ? "" : r.discountPercent + "%"
+          )
+        : "";
+    const steps = (r.steps || [])
+      .map(
+        (s) => `
+        <li>
+          <b>${esc(s.action)}</b> by ${esc(s.actor || "—")}
+          <small>${esc(dateTime12(s.actionDate))}</small>
+          ${s.comments ? `<span>${esc(s.comments)}</span>` : ""}
+        </li>`
+      )
+      .join("");
+    screen.innerHTML = `
+      <div class="card">
+        <div class="row-head">
+          <h2 class="detail-title">${esc(r.requestType)}</h2>
+          <span class="pill ${REQUEST_STATUS_PILL[r.status] || ""}">${esc(r.status)}</span>
+        </div>
+        <p class="muted">${esc(r.name)}</p>
+      </div>
+      <div class="card">
+        <h2 class="form-title">What Is Asked</h2>
+        ${
+          r.currentValue || r.requestedValue
+            ? field(
+                plainFieldName(r.fieldToUpdate) || "Change",
+                (r.currentValue || "—") + " → " + (r.requestedValue || "—")
+              )
+            : ""
+        }
+        ${price}
+        ${field("Share with", r.requestedSharedRm)}
+        ${field("Requested by", r.requester)}
+        ${field("Requested on", dateTime12(r.requestDate))}
+        ${field("Justification", r.justification)}
+      </div>
+      <div class="card">
+        <h2 class="form-title">The Deal</h2>
+        ${field("Client", r.client)}
+        ${field("Project", r.project)}
+        ${field("Unit", r.unit)}
+        ${field("Deal", r.dealName)}
+        ${field("Stage", r.dealStage)}
+        ${
+          r.dealId && r.canOpenDeal
+            ? `<a class="button-outline button-link" href="#/deal?id=${esc(r.dealId)}">Open the Deal</a>`
+            : !r.dealId
+              ? `<p class="muted">No deal is linked to this request.</p>`
+              : ""
+        }
+      </div>
+      <div class="card">
+        <h2 class="form-title">Decisions So Far</h2>
+        ${steps ? `<ul class="request-steps">${steps}</ul>` : `<p class="muted">None yet.</p>`}
+        ${
+          (r.waitingFor || []).length
+            ? `<p class="muted">Waiting for: <b>${esc(r.waitingFor.join(", "))}</b></p>`
+            : ""
+        }
+      </div>
+      ${
+        r.canDecide
+          ? `<div class="card form">
+               <h2 class="form-title">Your Decision</h2>
+               <label class="form-field">
+                 <span>Comment (required when rejecting)</span>
+                 <textarea class="search" rows="3" id="decision-comment" maxlength="4000"></textarea>
+               </label>
+               <div id="form-status">${note}</div>
+               <button type="button" class="button-primary" data-decide="approve">Approve</button>
+               <button type="button" class="button-outline button-reject" data-decide="reject">Reject</button>
+             </div>`
+          : note
+            ? `<div class="card">${note}</div>`
+            : ""
+      }`;
+  }
+
+  screen.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-decide]");
+    if (!button) {
+      return;
+    }
+    const action = button.dataset.decide;
+    const comments = document.getElementById("decision-comment").value.trim();
+    const status = document.getElementById("form-status");
+    if (action === "reject" && comments.length < 3) {
+      status.innerHTML = errorBox("Please write the reason for rejecting.");
+      document.getElementById("decision-comment").focus();
+      return;
+    }
+    // one more tap: a decision cannot be taken back from here
+    if (button.dataset.sure !== "yes") {
+      screen.querySelectorAll("[data-decide]").forEach((other) => {
+        other.dataset.sure = "";
+        other.textContent =
+          other.dataset.decide === "approve" ? "Approve" : "Reject";
+      });
+      button.dataset.sure = "yes";
+      button.textContent =
+        action === "approve" ? "Tap Again to Approve" : "Tap Again to Reject";
+      status.innerHTML = "";
+      return;
+    }
+    screen.querySelectorAll("[data-decide]").forEach((other) => {
+      other.disabled = true;
+    });
+    status.innerHTML = `<div class="working"><span class="spinner"></span><span>Saving your decision…</span></div>`;
+    try {
+      r = await post("approvals/decide", { requestId: id, action, comments });
+      note = `<div class="notice notice-ok notice-left"><b>${action === "approve" ? "Approved" : "Rejected"}</b><p>${
+        (r.waitingFor || []).length
+          ? "The request now goes to " + esc(r.waitingFor.join(", ")) + "."
+          : "The request is decided."
+      }</p></div>`;
+      toast(action === "approve" ? "Approved." : "Rejected.");
+    } catch (error) {
+      if (error instanceof SignedOutError) {
+        handleError(error);
+        return;
+      }
+      note = errorBox(error.message);
+      try {
+        r = await get("approvals/detail", { id });
+      } catch (e) {
+        // keep what is on the screen
+      }
+    }
+    if (token === renderToken) {
+      draw();
+      window.scrollTo(0, document.body.scrollHeight);
+    }
+  });
+  draw();
 }
 
 async function requestsBox(deal, token) {
@@ -3971,7 +4169,8 @@ function renderMe() {
        <p class="kv"><span>Connected to</span><b>${esc(CONFIG.environment)}</b></p>
        <p class="kv"><span>App version</span><b>${esc(CONFIG.version)}</b></p>
      </div>
-     <button class="button-secondary" id="sign-out">Sign out</button>`,
+     <a class="button-outline button-link" href="#/approvals">My Approvals</a>
+     <button class="button-secondary below" id="sign-out">Sign out</button>`,
     "",
     { back: "#/home" }
   );
@@ -4028,6 +4227,10 @@ async function render() {
       await renderContactNew(token, params);
     } else if (path === "edit") {
       await renderEdit(token, params);
+    } else if (path === "approvals") {
+      await renderApprovals(token);
+    } else if (path === "approval") {
+      await renderApproval(token, params);
     } else if (path === "request-dld") {
       await renderRequestDld(token, params);
     } else if (path === "deal-owners") {
