@@ -217,6 +217,15 @@ function infiniteList(listEl, loadPage, renderRow, emptyMessage, token) {
     } finally {
       busy = false;
     }
+    // On a tall screen one page may not fill it: the end marker is then still in view and
+    // no scroll will ever happen, so keep loading until the screen is full or the list ends.
+    if (
+      !done &&
+      token === renderToken &&
+      sentinel.getBoundingClientRect().top < window.innerHeight + 300
+    ) {
+      more();
+    }
   }
 
   if (scrollWatcher) {
