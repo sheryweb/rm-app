@@ -1062,11 +1062,170 @@ async function renderDeal(token, params) {
       ${field("Shared with", deal.sharedWith)}
       ${field("Created", shortDate(deal.createdDate))}
     </div>
+    <div id="booking-form-box"></div>
     ${
       deal.clientId
         ? `<a class="button-outline button-link" href="#/client?id=${esc(deal.clientId)}&from=deal:${esc(deal.id)}">Open Client</a>`
         : ""
     }`;
+  bookingFormBox(deal, token);
+}
+
+/**
+ * The booking form on a deal: the app's version of the "Generate Booking Form PDF" button.
+ * Salesforce decides whether it can be generated (stage, unit, Customer Due Diligence of every
+ * buyer) and makes the same PDF; the app shows the answer and hands the file to the phone.
+ */
+async function bookingFormBox(deal, token) {
+  const box = document.getElementById("booking-form-box");
+  let status;
+  let file = null;
+  let fileUrl = null;
+  let note = "";
+
+  function draw() {
+    const gaps = (status.gaps || [])
+      .map((line) => `<li>${esc(line)}</li>`)
+      .join("");
+    const canShare = Boolean(
+      file && navigator.canShare && navigator.canShare({ files: [file] })
+    );
+    box.innerHTML = `
+      <div class="card form">
+        <h2 class="form-title">Booking Form</h2>
+        ${
+          status.fileVersionId
+            ? `<p class="muted">Last generated ${esc(dateTime12(status.fileDate))}${status.fileSize ? " · " + sizeText(status.fileSize) : ""}</p>`
+            : status.canGenerate
+              ? `<p class="muted">No booking form has been generated for this deal yet.</p>`
+              : ""
+        }
+        ${status.reason ? `<p class="muted">${esc(status.reason)}</p>` : ""}
+        ${
+          gaps
+            ? `<div class="notice notice-warn notice-left">
+                 <b>Customer Due Diligence is incomplete</b>
+                 <ul class="gap-list">${gaps}</ul>
+                 ${deal.clientId ? `<a class="button-outline button-link" href="#/client?id=${esc(deal.clientId)}&from=deal:${esc(deal.id)}">Open Client to Complete</a>` : ""}
+               </div>`
+            : ""
+        }
+        ${
+          file
+            ? `<div class="file-row">
+                 <div class="file-text"><b>${esc(status.fileTitle)}</b><span>${sizeText(file.size)}</span></div>
+                 <a class="file-link" href="${fileUrl}" target="_blank" rel="noopener">Open</a>
+                 <a class="file-link" href="${fileUrl}" download="${esc(file.name)}">Save</a>
+               </div>
+               ${canShare ? `<button type="button" class="button-primary" id="form-share">Share (WhatsApp, Email…)</button>` : ""}`
+            : status.fileVersionId
+              ? `<button type="button" class="button-outline" id="form-get">Open the Booking Form</button>`
+              : ""
+        }
+        <div id="form-box-status">${note}</div>
+        ${
+          status.canGenerate
+            ? `<button type="button" class="${status.fileVersionId ? "button-outline" : "button-primary"}" id="form-generate">${status.fileVersionId ? "Generate Again" : "Generate Booking Form"}</button>
+               ${status.fileVersionId ? `<p class="muted">Generating again replaces the previous booking form.</p>` : ""}`
+            : ""
+        }
+      </div>`;
+    const busy = (text) => {
+      document.getElementById("form-box-status").innerHTML =
+        `<div class="working"><span class="spinner"></span><span>${esc(text)}</span></div>`;
+      box.querySelectorAll("button").forEach((button) => {
+        button.disabled = true;
+      });
+    };
+    const fail = (error) => {
+      if (error instanceof SignedOutError) {
+        handleError(error);
+        return;
+      }
+      note = errorBox(error.message);
+      if (token === renderToken) {
+        draw();
+      }
+    };
+    const fetchFile = async () => {
+      if (fileUrl) {
+        URL.revokeObjectURL(fileUrl);
+      }
+      file = await downloadFile(
+        status.fileVersionId,
+        status.fileTitle + ".pdf",
+        "application/pdf"
+      );
+      fileUrl = URL.createObjectURL(file);
+    };
+    const get1 = document.getElementById("form-get");
+    if (get1) {
+      get1.addEventListener("click", async () => {
+        busy("Getting the booking form…");
+        try {
+          await fetchFile();
+          note = "";
+          if (token === renderToken) {
+            draw();
+          }
+        } catch (error) {
+          fail(error);
+        }
+      });
+    }
+    const share = document.getElementById("form-share");
+    if (share) {
+      share.addEventListener("click", async () => {
+        try {
+          await navigator.share({ files: [file], title: "Booking Form" });
+        } catch (e) {
+          // the user closed the share sheet
+        }
+      });
+    }
+    const generate = document.getElementById("form-generate");
+    if (generate) {
+      generate.addEventListener("click", async () => {
+        busy("Generating the booking form. This can take up to a minute…");
+        try {
+          // two calls: Salesforce cannot make the PDF right after removing the old file
+          await post("deals/bookingform/cleanup", { dealId: deal.id });
+          status = await post("deals/bookingform/generate", {
+            dealId: deal.id
+          });
+          file = null;
+          await fetchFile();
+          note = "";
+          toast("Booking form ready.");
+          if (token === renderToken) {
+            draw();
+          }
+        } catch (error) {
+          try {
+            status = await get("deals/bookingform", { id: deal.id });
+            file = null;
+          } catch (e) {
+            // keep what is on the screen
+          }
+          fail(error);
+        }
+      });
+    }
+  }
+
+  try {
+    status = await get("deals/bookingform", { id: deal.id });
+  } catch (error) {
+    if (token === renderToken && box) {
+      box.innerHTML = errorBox(
+        "The booking form could not be checked: " + error.message
+      );
+    }
+    return;
+  }
+  if (token === renderToken && box) {
+    draw();
+  }
 }
 
 // ------------------------------------------------------------------ clients

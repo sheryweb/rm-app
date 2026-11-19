@@ -1356,3 +1356,23 @@ a.button-outline {
   margin: 8px 0 0;
   color: var(--ok);
 }
+
+/* ---------- booking form on a deal ---------- */
+
+#booking-form-box {
+  margin-bottom: 12px;
+}
+
+.gap-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
+.gap-list li {
+  margin-bottom: 4px;
+}
+
+#booking-form-box .button-outline,
+#booking-form-box .button-primary {
+  margin-top: 10px;
+}
