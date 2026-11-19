@@ -1064,6 +1064,14 @@ async function renderDeal(token, params) {
     </div>
     <div id="buyers-box"></div>
     <div id="booking-form-box"></div>
+    ${
+      ["New", "Cancelled", "Transferred"].includes(deal.stage)
+        ? ""
+        : `<div class="card form">
+             <h2 class="form-title">Raise a Request</h2>
+             <a class="button-outline button-link" href="#/request-dld?deal=${esc(deal.id)}">DLD Waiver Request</a>
+           </div>`
+    }
     <div id="requests-box"></div>
     ${
       deal.clientId
@@ -1134,6 +1142,149 @@ function requestCard(r) {
       }
       ${steps ? `<ul class="request-steps">${steps}</ul>` : ""}
     </details>`;
+}
+
+/** A request that is waiting for a decision, shown instead of the form. */
+function openRequestNote(title, open, extraRows) {
+  return `
+    <div class="notice notice-warn notice-left">
+      <b>${esc(title)} ${esc(open.name || "")} is ${esc(String(open.status || "").toLowerCase())}</b>
+      ${extraRows}
+      ${field("Justification", open.justification)}
+      <p>A new request can be raised once this one is decided.</p>
+    </div>`;
+}
+
+/** Who decides first: picked from a list by some profiles, the line manager for the others. */
+function approverPart(view) {
+  if (view.approvers) {
+    return `
+      <label class="form-field">
+        <span>First approver *</span>
+        <select class="select" id="request-approver">
+          <option value="">Select…</option>
+          ${view.approvers.map((a) => `<option value="${esc(a.id)}">${esc(a.name)}</option>`).join("")}
+        </select>
+      </label>`;
+  }
+  return view.lineManager
+    ? `<p class="muted">This request goes first to your line manager, <b>${esc(view.lineManager)}</b>.</p>`
+    : errorBox(
+        "Your user has no active line manager in Salesforce, so the request has nobody to go to. Ask the Salesforce admin to set your Manager."
+      );
+}
+
+async function renderRequestDld(token, params) {
+  const dealId = params.get("deal");
+  const back = "#/deal?id=" + dealId;
+  shell("DLD Waiver Request", loading(), "deals", { back });
+  const view = await get("requests/dldwaiver", { dealId });
+  if (token !== renderToken) {
+    return;
+  }
+  const info = view.info || {};
+  const screen = document.getElementById("screen");
+  const summary = `
+    <div class="card">
+      ${field("Deal", info.opportunityName)}
+      ${field("Client", info.accountName)}
+      ${field("Unit", [info.projectName, info.unitTitle].filter(Boolean).join(" · "))}
+      ${field("Stage", info.stageName)}
+      ${field("Registration fee now", info.currentFee)}
+    </div>`;
+
+  if (view.open) {
+    screen.innerHTML =
+      summary +
+      openRequestNote(
+        "DLD waiver request",
+        view.open,
+        field("Requested fee", view.open.requestedFee)
+      );
+    return;
+  }
+  if (!view.canRequest) {
+    screen.innerHTML =
+      summary + errorBox("Your profile cannot raise a DLD waiver request.");
+    return;
+  }
+  if (!info.eligible) {
+    screen.innerHTML =
+      summary +
+      errorBox(
+        info.ineligibleReason ||
+          "This deal cannot have a DLD waiver request now."
+      );
+    return;
+  }
+
+  const choices = (info.feeOptions || []).filter((f) => f !== info.currentFee);
+  screen.innerHTML = `
+    ${summary}
+    <form class="card form" id="request-form" novalidate>
+      <div class="form-field">
+        <span>Requested registration fee *</span>
+        <div class="checks">${choices
+          .map(
+            (fee) => `
+          <label class="form-check">
+            <input type="radio" name="fee" value="${esc(fee)}" />
+            <span>${esc(fee)}</span>
+          </label>`
+          )
+          .join("")}</div>
+      </div>
+      <label class="form-field">
+        <span>Justification * (at least 10 characters)</span>
+        <textarea class="search" rows="4" id="request-justification" maxlength="2000" placeholder="Why should the fee split change?"></textarea>
+      </label>
+      ${approverPart(view)}
+      <div id="form-status"></div>
+      <button class="button-primary" type="submit" id="request-submit">Submit for Approval</button>
+      <a class="button-outline button-link" href="${esc(back)}">Cancel</a>
+    </form>`;
+
+  const form = document.getElementById("request-form");
+  const status = document.getElementById("form-status");
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const fee = form.querySelector('input[name="fee"]:checked');
+    const justification = document
+      .getElementById("request-justification")
+      .value.trim();
+    const approver = document.getElementById("request-approver");
+    const problem = !fee
+      ? "Please choose the requested registration fee."
+      : justification.length < 10
+        ? "Please write a justification of at least 10 characters."
+        : approver && !approver.value
+          ? "Please choose the first approver."
+          : "";
+    if (problem) {
+      status.innerHTML = errorBox(problem);
+      return;
+    }
+    const button = document.getElementById("request-submit");
+    button.disabled = true;
+    status.innerHTML = `<div class="working"><span class="spinner"></span><span>Submitting…</span></div>`;
+    try {
+      await post("requests/dldwaiver/submit", {
+        dealId,
+        requestedFee: fee.value,
+        justification,
+        approverId: approver ? approver.value : null
+      });
+      toast("DLD waiver request submitted.");
+      location.hash = back;
+    } catch (error) {
+      if (error instanceof SignedOutError) {
+        handleError(error);
+        return;
+      }
+      status.innerHTML = errorBox(error.message);
+      button.disabled = false;
+    }
+  });
 }
 
 async function requestsBox(deal, token) {
@@ -3877,6 +4028,8 @@ async function render() {
       await renderContactNew(token, params);
     } else if (path === "edit") {
       await renderEdit(token, params);
+    } else if (path === "request-dld") {
+      await renderRequestDld(token, params);
     } else if (path === "deal-owners") {
       await renderDealOwners(token, params);
     } else if (path === "booking-new") {

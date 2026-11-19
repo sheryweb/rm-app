@@ -1483,3 +1483,13 @@ a.button-outline {
 .request-steps span {
   display: block;
 }
+
+/* ---------- raising a request ---------- */
+
+.form-check input[type="radio"] {
+  accent-color: var(--navy);
+}
+
+.notice-left .kv {
+  gap: 12px;
+}
