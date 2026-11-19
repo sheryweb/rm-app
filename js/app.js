@@ -382,6 +382,11 @@ async function renderHome(token) {
       <span>${new Date().toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long" })}</span>
     </section>
 
+    <div class="quick-actions">
+      <a class="button-primary button-link" href="#/activity-new">Record Activity</a>
+      <a class="button-outline button-link" href="#/client-new">Add Client</a>
+    </div>
+
     <h3 class="section-title">My Day</h3>
     <div class="tiles">${tiles || emptyBox("Nothing needs attention.")}</div>
 

@@ -1305,3 +1305,12 @@ a.button-outline {
 .locked-hint {
   margin: 10px 0 0;
 }
+
+/* ---------- home quick actions ---------- */
+
+.quick-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin: 14px 0 4px;
+}
