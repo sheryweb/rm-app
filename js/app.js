@@ -404,6 +404,8 @@ async function renderHome(token) {
           ? " · last recorded " + esc(dateTime12(activity.lastLogged))
           : ""
       }</p>
+      <a class="button-primary button-link" href="#/activity-new">Record Activity</a>
+      <a class="button-outline button-link below" href="#/activities">My Activities</a>
     </div>
 
     <h3 class="section-title">My Performance ${esc(perf.year || "")}</h3>
@@ -1530,7 +1532,7 @@ async function renderEdit(token, params) {
     ? steps.length
     : steps.length + 1 + (isCompany ? 1 : 0);
   const stepLine = wizard
-    ? `<p class="steps">${isContact ? "Contact · " : ""}Step ${stepNumber} of ${stepTotal}</p>`
+    ? `<p class="step-line">${isContact ? "Contact · " : ""}Step ${stepNumber} of ${stepTotal}</p>`
     : "";
 
   shell(
@@ -1663,7 +1665,7 @@ async function renderContactNew(token, params) {
         ? currency.value
         : null;
   document.getElementById("screen").innerHTML = `
-    ${wizard ? `<p class="steps">Last part · the company's contact</p>` : ""}
+    ${wizard ? `<p class="step-line">Last part · the company's contact</p>` : ""}
     <form class="card form" id="edit-form" novalidate>
       <h2 class="form-title">${esc(section.heading)}</h2>
       ${parts.map((part) => partInput(kit, part, start(part))).join("")}
@@ -2062,6 +2064,607 @@ async function renderClientNew(token, params) {
   });
 }
 
+// ----------------------------------------------------------- sales activities
+// The same steps, wording and rules as the "Record Activity" wizard in Salesforce: the save
+// goes to that wizard's own service, so nothing here decides what is valid.
+
+const ACTIVITY_COPY = {
+  "Client Meeting":
+    "You met a client, indoor, outdoor or online, introduced via an agency.",
+  "Agency Briefing":
+    "You briefed an agency's agents on projects, inventory or offers."
+};
+const DURATIONS = [
+  { label: "30 min", value: 30 },
+  { label: "45 min", value: 45 },
+  { label: "1 h", value: 60 },
+  { label: "1.5 h", value: 90 },
+  { label: "2 h", value: 120 },
+  { label: "3 h", value: 180 },
+  { label: "Custom", value: "custom" }
+];
+const PROOF_MAX_BYTES = 15 * 1024 * 1024;
+
+function isoDay(date) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function targetBar(label, done, target) {
+  const percent =
+    target > 0
+      ? Math.min(100, Math.round((done / target) * 100))
+      : done > 0
+        ? 100
+        : 0;
+  return `
+    <div class="progress">
+      <div class="progress-head"><span>${esc(label)}</span><b>${done}${target > 0 ? " / " + target : ""}</b></div>
+      <div class="progress-track"><div class="progress-fill" style="width:${percent}%"></div></div>
+    </div>`;
+}
+
+function activityRow(a) {
+  const who = [a.agency, a.client].filter(Boolean).join(" · ");
+  const length =
+    a.minutes == null
+      ? ""
+      : a.minutes >= 60
+        ? ` · ${Math.round((a.minutes / 60) * 10) / 10} h`
+        : ` · ${a.minutes} min`;
+  return `
+    <article class="row">
+      <div class="row-head">
+        <h4>${esc(a.activity || a.name)}</h4>
+        ${a.activityType ? `<span class="pill pill-info">${esc(a.activityType)}</span>` : ""}
+      </div>
+      <p class="muted">${esc(who || "Not Registered Agency")}</p>
+      <p class="muted">${esc(dateTime12(a.startDateTime))}${length}${
+        a.outcome ? ` · ${esc(a.outcome)}` : ""
+      }</p>
+    </article>`;
+}
+
+function renderActivities(token) {
+  shell(
+    "My Activities",
+    `<a class="button-primary button-link" href="#/activity-new">Record Activity</a>
+     <div class="list list-gap" id="list"></div>`,
+    "home",
+    { back: "#/home" }
+  );
+  infiniteList(
+    document.getElementById("list"),
+    (offset) => get("activities", { pageSize: PAGE_SIZE, offset }),
+    activityRow,
+    "You have not recorded any activity yet.",
+    token
+  );
+}
+
+function readAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",")[1] || "");
+    reader.onerror = () => reject(new Error("The file could not be read."));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function renderActivityNew(token) {
+  shell("Record Activity", loading(), "home", { back: "#/home" });
+  const options = await get("activities/options");
+  if (token !== renderToken) {
+    return;
+  }
+  const screen = document.getElementById("screen");
+  const followDefault = new Date();
+  followDefault.setDate(followDefault.getDate() + 3);
+  const state = {
+    step: 1,
+    activity: null,
+    type: options.defaultType || null,
+    agency: null,
+    notRegistered: false,
+    client: null,
+    agents: "",
+    rms: [],
+    projects: [],
+    otherProject: "",
+    description: "",
+    outcome: null,
+    date: isoDay(new Date()),
+    startTime: "10:00",
+    duration: 60,
+    customEnd: "",
+    followUp: false,
+    followUpDate: isoDay(followDefault),
+    followUpNote: "",
+    error: ""
+  };
+  let saved = null;
+  const proofs = [];
+  const isBriefing = () => state.activity === "Agency Briefing";
+  const otherPicked = () => state.projects.includes(options.otherProjectValue);
+
+  const chipRow = (values, isOn, attribute) =>
+    `<div class="chips chips-wrap">${values
+      .map(
+        (value) =>
+          `<button type="button" class="chip${isOn(value) ? " is-active" : ""}" data-${attribute}="${esc(value)}">${esc(value)}</button>`
+      )
+      .join("")}</div>`;
+
+  const lookup = (key, label, picked, placeholder, disabled) => `
+    <div class="form-field">
+      <span>${label}</span>
+      ${
+        picked
+          ? `<div class="picked"><b>${esc(picked.name)}</b><button type="button" class="picked-clear" data-clear="${key}" aria-label="Remove">✕</button></div>`
+          : `<input class="search" type="search" data-lookup="${key}" placeholder="${esc(placeholder)}" autocomplete="off"${disabled ? " disabled" : ""} />
+             <div class="lookup-results" data-results="${key}"></div>`
+      }
+    </div>`;
+
+  function stepOne() {
+    return `
+      <div class="card">
+        ${targetBar("Inbound this week", options.weekInbound || 0, options.inboundTarget || 0)}
+        ${targetBar("Outbound this week", options.weekOutbound || 0, options.outboundTarget || 0)}
+      </div>
+      <p class="step-line">Step 1 of 3 · What did you do?</p>
+      ${(options.activities || [])
+        .map(
+          (name) => `
+        <button type="button" class="card pick-card" data-activity="${esc(name)}">
+          <b>${esc(name)}</b>
+          <span>${esc(ACTIVITY_COPY[name] || "")}</span>
+        </button>`
+        )
+        .join("")}
+      <a class="button-outline button-link" href="#/activities">My Activities</a>`;
+  }
+
+  function stepTwo() {
+    return `
+      <p class="step-line">Step 2 of 3 · ${esc(state.activity)}</p>
+      <div class="card form">
+        <div class="form-field">
+          <span>How was it held? *</span>
+          ${chipRow(options.types || [], (v) => v === state.type, "type")}
+        </div>
+        ${lookup(
+          "agency",
+          `Agency${state.notRegistered ? "" : " *"}`,
+          state.notRegistered ? null : state.agency,
+          state.notRegistered ? "Not a registered agency" : "Search agencies…",
+          state.notRegistered
+        )}
+        <label class="form-check">
+          <input type="checkbox" id="not-registered"${state.notRegistered ? " checked" : ""} />
+          <span>Not Registered Agency</span>
+        </label>
+        ${lookup("client", "Client (optional)", state.client, "Search clients…", false)}
+        <label class="form-field">
+          <span>${isBriefing() ? "Number of agents briefed *" : "Number of agents present (optional)"}</span>
+          <input class="search" type="text" inputmode="numeric" data-bind="agents" value="${esc(state.agents)}" autocomplete="off" />
+        </label>
+        <div class="form-field">
+          <span>Other RMs who attended (optional)</span>
+          <input class="search" type="search" id="rm-search" placeholder="Type a name…" autocomplete="off" />
+          <div class="lookup-results" id="rm-results"></div>
+          ${
+            state.rms.length
+              ? `<div class="chips chips-wrap">${state.rms
+                  .map(
+                    (name) =>
+                      `<button type="button" class="chip is-active" data-rm-remove="${esc(name)}">${esc(name)} ✕</button>`
+                  )
+                  .join("")}</div>`
+              : ""
+          }
+        </div>
+        <div class="form-field">
+          <span>Projects discussed (optional)</span>
+          ${chipRow(options.projectNames || [], (v) => state.projects.includes(v), "project")}
+          ${
+            otherPicked()
+              ? `<input class="search other-project" type="text" maxlength="100" data-bind="otherProject" placeholder="Which project?" value="${esc(state.otherProject)}" autocomplete="off" />`
+              : ""
+          }
+        </div>
+        <label class="form-field">
+          <span>What was discussed? (optional)</span>
+          <textarea class="search" rows="3" maxlength="255" data-bind="description" placeholder="${
+            isBriefing()
+              ? "What was presented? Projects covered, agent questions, agreed follow-ups…"
+              : "What was discussed? Client interest, units shown, objections, next step…"
+          }">${esc(state.description)}</textarea>
+        </label>
+        <div class="form-field">
+          <span>How did it go? *</span>
+          ${chipRow(options.outcomes || [], (v) => v === state.outcome, "outcome")}
+        </div>
+        <div id="form-status">${state.error ? errorBox(state.error) : ""}</div>
+        <button type="button" class="button-primary" id="to-when">Continue</button>
+        <button type="button" class="button-outline" data-step="1">Back</button>
+      </div>`;
+  }
+
+  function stepThree() {
+    return `
+      <p class="step-line">Step 3 of 3 · When did it happen?</p>
+      <div class="card form">
+        <label class="form-field">
+          <span>Date *</span>
+          <input class="search" type="date" data-bind="date" max="${isoDay(new Date())}" value="${esc(state.date)}" />
+        </label>
+        <label class="form-field">
+          <span>Start time *</span>
+          <input class="search" type="time" data-bind="startTime" value="${esc(state.startTime)}" />
+        </label>
+        <div class="form-field">
+          <span>How long did it take? *</span>
+          <div class="chips chips-wrap">${DURATIONS.map(
+            (d) =>
+              `<button type="button" class="chip${d.value === state.duration ? " is-active" : ""}" data-duration="${d.value}">${d.label}</button>`
+          ).join("")}</div>
+        </div>
+        ${
+          state.duration === "custom"
+            ? `<label class="form-field">
+                 <span>End time *</span>
+                 <input class="search" type="time" data-bind="customEnd" value="${esc(state.customEnd)}" />
+               </label>`
+            : ""
+        }
+        <label class="form-check">
+          <input type="checkbox" id="follow-up"${state.followUp ? " checked" : ""} />
+          <span>Schedule a follow-up task for yourself</span>
+        </label>
+        ${
+          state.followUp
+            ? `<label class="form-field">
+                 <span>Follow up on</span>
+                 <input class="search" type="date" data-bind="followUpDate" min="${isoDay(new Date())}" value="${esc(state.followUpDate)}" />
+               </label>
+               <label class="form-field">
+                 <span>Note (optional)</span>
+                 <input class="search" type="text" maxlength="255" data-bind="followUpNote" value="${esc(state.followUpNote)}" autocomplete="off" />
+               </label>`
+            : ""
+        }
+        <div id="form-status">${state.error ? errorBox(state.error) : ""}</div>
+        <button type="button" class="button-primary" id="save-activity">Save Activity</button>
+        <button type="button" class="button-outline" data-step="2">Back</button>
+      </div>`;
+  }
+
+  function done() {
+    const count = saved.weekCount || 0;
+    const met =
+      (saved.weekInbound || 0) >= (saved.inboundTarget || 0) &&
+      (saved.weekOutbound || 0) >= (saved.outboundTarget || 0);
+    const praise = met
+      ? "Weekly target met. Brilliant!"
+      : count >= 10
+        ? "Great momentum!"
+        : count >= 5
+          ? "Nice pace!"
+          : "";
+    return `
+      <div class="card">
+        <h2 class="form-title">Activity ${esc(saved.recordName)} saved</h2>
+        <p class="muted">That's ${count} activit${count === 1 ? "y" : "ies"} recorded this week.${
+          saved.followUpDate
+            ? ` A follow-up task is set for ${esc(saved.followUpDate)}.`
+            : ""
+        } ${praise}</p>
+        ${targetBar("Inbound this week", saved.weekInbound || 0, saved.inboundTarget || 0)}
+        ${targetBar("Outbound this week", saved.weekOutbound || 0, saved.outboundTarget || 0)}
+      </div>
+      <div class="card form">
+        <h2 class="form-title">Proof of Activity (optional)</h2>
+        <p class="muted">Add a photo of the meeting or briefing. It is saved on the activity in Salesforce.</p>
+        <label class="button-outline button-link proof-pick">
+          Add Photo or File
+          <input type="file" id="proof-input" accept="image/*,application/pdf" multiple hidden />
+        </label>
+        <div id="proof-status"></div>
+        ${
+          proofs.length
+            ? `<ul class="proof-list">${proofs.map((name) => `<li>${esc(name)}</li>`).join("")}</ul>`
+            : ""
+        }
+      </div>
+      <a class="button-primary button-link" href="#/activity-new" id="another">Record Another Activity</a>
+      <a class="button-outline button-link below" href="#/activities">My Activities</a>`;
+  }
+
+  function validateDetails() {
+    if (!state.type) {
+      return "Please choose how it was held.";
+    }
+    if (!state.notRegistered && !state.agency) {
+      return 'Please select the agency, or tick "Not Registered Agency".';
+    }
+    const agents = state.agents.trim();
+    if (agents && !/^\d{1,5}$/.test(agents)) {
+      return "The number of agents must be a whole number.";
+    }
+    if (isBriefing() && (!agents || Number(agents) < 1)) {
+      return "Please enter how many agents attended the briefing.";
+    }
+    if (otherPicked() && !state.otherProject.trim()) {
+      return "Please name the project you discussed that is not in the list.";
+    }
+    if (!state.outcome) {
+      return "Please pick an outcome: how did it go?";
+    }
+    return "";
+  }
+
+  function times() {
+    if (!state.date || !state.startTime) {
+      throw new Error("Please set the date and the start time.");
+    }
+    const start = new Date(state.date + "T" + state.startTime);
+    let end;
+    if (state.duration === "custom") {
+      if (!state.customEnd) {
+        throw new Error("Please set the end time.");
+      }
+      end = new Date(state.date + "T" + state.customEnd);
+    } else {
+      end = new Date(start.getTime() + state.duration * 60000);
+    }
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+      throw new Error("The date or time is not valid.");
+    }
+    if (end <= start) {
+      throw new Error("The end time must be after the start time.");
+    }
+    if (start > new Date()) {
+      throw new Error(
+        "The activity cannot start in the future. Record it after it has happened."
+      );
+    }
+    return { start, end };
+  }
+
+  async function save() {
+    let when;
+    try {
+      when = times();
+      if (state.followUp && !state.followUpDate) {
+        throw new Error("Please set the follow-up date.");
+      }
+    } catch (error) {
+      state.error = error.message;
+      draw();
+      return;
+    }
+    const button = document.getElementById("save-activity");
+    button.disabled = true;
+    document.getElementById("form-status").innerHTML =
+      `<div class="working"><span class="spinner"></span><span>Saving…</span></div>`;
+    try {
+      saved = await post("activities/save", {
+        activity: state.activity,
+        activityType: state.type,
+        agencyId: state.notRegistered || !state.agency ? null : state.agency.id,
+        notRegisteredAgency: state.notRegistered,
+        clientId: state.client ? state.client.id : null,
+        description: state.description,
+        startDateTime: when.start.toISOString(),
+        endDateTime: when.end.toISOString(),
+        numberOfAgents: state.agents.trim() ? Number(state.agents) : null,
+        rmsAttended: state.rms,
+        outcome: state.outcome,
+        projectsDiscussed: state.projects,
+        otherProject: state.otherProject,
+        followUpDate: state.followUp ? state.followUpDate : "",
+        followUpNote: state.followUp ? state.followUpNote : ""
+      });
+      state.step = 4;
+      state.error = "";
+      draw();
+      window.scrollTo(0, 0);
+    } catch (error) {
+      if (error instanceof SignedOutError) {
+        handleError(error);
+        return;
+      }
+      state.error = error.message;
+      draw();
+    }
+  }
+
+  async function addProofs(files) {
+    const status = document.getElementById("proof-status");
+    for (const file of files) {
+      if (file.size > PROOF_MAX_BYTES) {
+        status.innerHTML = errorBox(
+          file.name + " is larger than 15 MB and was not added."
+        );
+        continue;
+      }
+      status.innerHTML = `<div class="working"><span class="spinner"></span><span>Adding ${esc(file.name)}…</span></div>`;
+      try {
+        await change("POST", "sobjects/ContentVersion", {
+          Title: file.name.replace(/\.[^.]+$/, ""),
+          PathOnClient: file.name,
+          VersionData: await readAsBase64(file),
+          FirstPublishLocationId: saved.recordId
+        });
+        proofs.push(file.name);
+        status.innerHTML = "";
+      } catch (error) {
+        if (error instanceof SignedOutError) {
+          handleError(error);
+          return;
+        }
+        status.innerHTML = errorBox(
+          file.name + " could not be added: " + error.message
+        );
+        return;
+      }
+    }
+    if (token === renderToken) {
+      draw();
+    }
+  }
+
+  function bindLookup(key, route) {
+    const input = screen.querySelector(`[data-lookup="${key}"]`);
+    const results = screen.querySelector(`[data-results="${key}"]`);
+    if (!input || !results) {
+      return;
+    }
+    let latest = 0;
+    input.addEventListener(
+      "input",
+      debounce(async () => {
+        const term = input.value.trim();
+        const mine = ++latest;
+        if (term.length < 2) {
+          results.innerHTML = "";
+          return;
+        }
+        try {
+          const found = await get(route, { search: term });
+          if (mine !== latest) {
+            return;
+          }
+          results.innerHTML = found.length
+            ? found
+                .map(
+                  (o) =>
+                    `<button type="button" data-pick="${key}" data-id="${esc(o.id)}" data-name="${esc(o.name)}">${esc(o.name)}</button>`
+                )
+                .join("")
+            : `<p class="muted">No match.</p>`;
+        } catch (error) {
+          results.innerHTML = errorBox(error.message);
+        }
+      }, 300)
+    );
+  }
+
+  function draw() {
+    screen.innerHTML =
+      state.step === 1
+        ? stepOne()
+        : state.step === 2
+          ? stepTwo()
+          : state.step === 3
+            ? stepThree()
+            : done();
+    // typed values are kept as they are typed, so a redraw never loses them
+    screen.querySelectorAll("[data-bind]").forEach((el) =>
+      el.addEventListener("input", () => {
+        state[el.dataset.bind] = el.value;
+      })
+    );
+    bindLookup("agency", "activities/agencies");
+    bindLookup("client", "activities/clients");
+    const rmSearch = document.getElementById("rm-search");
+    if (rmSearch) {
+      rmSearch.addEventListener("input", () => {
+        const term = rmSearch.value.trim().toLowerCase();
+        document.getElementById("rm-results").innerHTML =
+          term.length < 2
+            ? ""
+            : (options.rmNames || [])
+                .filter(
+                  (name) =>
+                    name.toLowerCase().includes(term) &&
+                    !state.rms.includes(name)
+                )
+                .slice(0, 8)
+                .map(
+                  (name) =>
+                    `<button type="button" data-rm-add="${esc(name)}">${esc(name)}</button>`
+                )
+                .join("");
+      });
+    }
+    const proofInput = document.getElementById("proof-input");
+    if (proofInput) {
+      proofInput.addEventListener("change", () =>
+        addProofs([...proofInput.files])
+      );
+    }
+  }
+
+  screen.addEventListener("change", (event) => {
+    if (event.target.id === "not-registered") {
+      state.notRegistered = event.target.checked;
+      draw();
+    } else if (event.target.id === "follow-up") {
+      state.followUp = event.target.checked;
+      draw();
+    }
+  });
+  screen.addEventListener("click", (event) => {
+    const el = event.target.closest("button");
+    if (!el || !screen.contains(el)) {
+      return;
+    }
+    const d = el.dataset;
+    if (d.activity) {
+      state.activity = d.activity;
+      state.step = 2;
+      window.scrollTo(0, 0);
+    } else if (d.type) {
+      state.type = d.type;
+    } else if (d.outcome) {
+      state.outcome = d.outcome;
+    } else if (d.project) {
+      state.projects = state.projects.includes(d.project)
+        ? state.projects.filter((p) => p !== d.project)
+        : [...state.projects, d.project];
+    } else if (d.pick) {
+      state[d.pick] = { id: d.id, name: d.name };
+    } else if (d.clear) {
+      state[d.clear] = null;
+    } else if (d.rmAdd) {
+      state.rms = [...state.rms, d.rmAdd];
+    } else if (d.rmRemove) {
+      state.rms = state.rms.filter((name) => name !== d.rmRemove);
+    } else if (d.duration) {
+      state.duration = d.duration === "custom" ? "custom" : Number(d.duration);
+    } else if (d.step) {
+      state.step = Number(d.step);
+      state.error = "";
+      window.scrollTo(0, 0);
+    } else if (el.id === "to-when") {
+      state.error = validateDetails();
+      if (!state.error) {
+        state.step = 3;
+        window.scrollTo(0, 0);
+      }
+    } else if (el.id === "save-activity") {
+      save();
+      return;
+    } else {
+      return;
+    }
+    if (d.type || d.outcome || d.project || d.duration) {
+      state.error = "";
+    }
+    draw();
+  });
+  document.getElementById("screen").addEventListener("click", (event) => {
+    // "Record Another Activity" is the same address, so start over by hand
+    if (event.target.id === "another") {
+      event.preventDefault();
+      render();
+    }
+  });
+  draw();
+}
+
 // ----------------------------------------------------------------------- me
 
 function renderMe() {
@@ -2134,6 +2737,10 @@ async function render() {
       await renderContactNew(token, params);
     } else if (path === "edit") {
       await renderEdit(token, params);
+    } else if (path === "activities") {
+      renderActivities(token);
+    } else if (path === "activity-new") {
+      await renderActivityNew(token);
     } else if (path === "client-new") {
       await renderClientNew(token, params);
     } else if (path === "me") {

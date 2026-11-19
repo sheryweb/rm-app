@@ -1121,7 +1121,7 @@ a.icon-button {
   margin: 0 0 10px;
 }
 
-.steps {
+.step-line {
   margin: 0 4px 10px;
   font-size: 13px;
   font-weight: 600;
@@ -1203,4 +1203,101 @@ a.icon-button {
 
 .notice-ok {
   margin-bottom: 12px;
+}
+
+/* ---------- sales activities ---------- */
+
+a.button-primary {
+  text-decoration: none;
+}
+
+.below,
+.list-gap {
+  margin-top: 10px;
+}
+
+a.button-outline {
+  text-decoration: none;
+}
+
+.chips-wrap {
+  flex-wrap: wrap;
+  overflow: visible;
+  padding: 0;
+  margin: 0;
+}
+
+.pick-card {
+  display: block;
+  width: 100%;
+  border: 1px solid var(--line);
+  text-align: left;
+  font-size: 15px;
+  color: var(--text);
+}
+
+.pick-card b {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 17px;
+}
+
+.pick-card span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.picked {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 46px;
+  padding: 0 12px;
+  border: 1px solid var(--navy);
+  border-radius: 12px;
+  background: var(--info-bg);
+}
+
+.picked-clear {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  font-size: 16px;
+}
+
+.lookup-results button {
+  display: block;
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: var(--card);
+  color: var(--text);
+  font-size: 15px;
+  text-align: left;
+}
+
+.lookup-results .muted {
+  margin: 8px 4px 0;
+}
+
+.other-project {
+  margin-top: 10px;
+}
+
+.proof-pick {
+  cursor: pointer;
+}
+
+.proof-list {
+  margin: 12px 0 0;
+  padding-left: 18px;
+  color: var(--ok);
+  font-size: 14px;
 }
