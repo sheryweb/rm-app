@@ -1439,6 +1439,47 @@ function recordTypeName(kit, recordTypeId) {
   return found ? found.name : "";
 }
 
+/**
+ * Due diligence boxes that are only asked for after a certain answer (for example "Source of
+ * Funds - Other") stay hidden until that answer is chosen. The rules come from the booking
+ * form check in Salesforce, so the form and the check always agree.
+ */
+function applyConditions(form, conditions) {
+  const rules = [];
+  (conditions || []).forEach((rule) => {
+    [
+      [rule.field, rule.parent],
+      [rule.personField, rule.personParent]
+    ].forEach(([field, parent]) => {
+      const child = form.querySelector(`[data-field="${field}"]`);
+      const parentEl = form.querySelector(`[data-field="${parent}"]`);
+      if (child && parentEl) {
+        const twin = form.querySelector(
+          `[data-field="${field.replace(/__(c|pc)$/, "_Arabic__$1")}"]`
+        );
+        rules.push({
+          boxes: [child, twin].filter(Boolean),
+          parentEl,
+          values: rule.whenParentHas || []
+        });
+      }
+    });
+  });
+  const picked = (el) =>
+    el.dataset.type === "MultiPicklist"
+      ? [...el.querySelectorAll("input:checked")].map((box) => box.value)
+      : [el.value];
+  const refresh = () =>
+    rules.forEach((rule) => {
+      const show = picked(rule.parentEl).some((v) => rule.values.includes(v));
+      rule.boxes.forEach((el) => {
+        (el.closest(".form-field") || el).hidden = !show;
+      });
+    });
+  rules.forEach((rule) => rule.parentEl.addEventListener("change", refresh));
+  refresh();
+}
+
 async function renderEdit(token, params) {
   const id = params.get("id");
   const wizard = params.get("wizard") === "1";
@@ -1453,6 +1494,9 @@ async function renderEdit(token, params) {
     "ui-api/records/" + id + "?layoutTypes=Full&modes=Edit"
   );
   const kit = await editKit(record.apiName, record.recordTypeId);
+  if (!clientOptions) {
+    clientOptions = await get("clients/options");
+  }
   if (token !== renderToken) {
     return;
   }
@@ -1513,6 +1557,7 @@ async function renderEdit(token, params) {
   const form = document.getElementById("edit-form");
   const status = document.getElementById("form-status");
   const saveButton = document.getElementById("edit-save");
+  applyConditions(form, clientOptions.conditions);
 
   function onward() {
     if (!wizard) {
@@ -1762,6 +1807,39 @@ async function renderClient(token, params) {
       </a>`
     )
     .join("");
+  // what the booking form still needs, by the same rules as the booking form check
+  const gaps = client.bookingForm || { missing: [] };
+  const dueDiligence = layout.sections.find((section) =>
+    /due diligence/i.test(section.heading)
+  );
+  const contactHash = "#/contact?id=" + gaps.contactId + "&client=" + client.id;
+  let bookingNote = "";
+  if (gaps.noPrimaryContact) {
+    bookingNote = `
+      <div class="notice notice-warn notice-left">
+        <b>Booking form: not ready</b>
+        <p>This company has no primary contact. Add the contact whose details the booking form should print, then fill in their Customer Due Diligence.</p>
+        <a class="button-outline button-link" href="#/contact-new?client=${esc(client.id)}">Add Contact</a>
+      </div>`;
+  } else if ((gaps.missing || []).length) {
+    const fix = company
+      ? `<a class="button-outline button-link" href="${esc(contactHash)}">Open ${esc(gaps.contactName || "Contact")}</a>`
+      : dueDiligence
+        ? `<a class="button-outline button-link" href="#/edit?id=${esc(client.id)}&s=${esc(dueDiligence.id)}">Complete Now</a>`
+        : "";
+    bookingNote = `
+      <div class="notice notice-warn notice-left">
+        <b>Booking form: ${gaps.missing.length} ${gaps.missing.length === 1 ? "detail" : "details"} missing</b>
+        <p>${company ? `On the primary contact ${esc(gaps.contactName || "")}: ` : ""}${esc(gaps.missing.join(", "))}.</p>
+        ${fix}
+      </div>`;
+  } else {
+    bookingNote = `
+      <div class="notice notice-ok notice-left">
+        <b>Booking form: ready</b>
+        <p>Customer Due Diligence is complete${company && gaps.contactName ? ` (primary contact ${esc(gaps.contactName)})` : ""}.</p>
+      </div>`;
+  }
   const contactLines = contacts
     .map(
       (person) => `
@@ -1781,6 +1859,7 @@ async function renderClient(token, params) {
       </div>
       ${contact ? `<div class="actions">${contact}</div>` : ""}
     </div>
+    ${bookingNote}
     ${layoutSections(
       record,
       layout,
