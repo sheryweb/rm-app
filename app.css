@@ -1314,3 +1314,45 @@ a.button-outline {
   gap: 10px;
   margin: 14px 0 4px;
 }
+
+/* ---------- book a unit ---------- */
+
+.start-booking {
+  margin-bottom: 12px;
+}
+
+.bar-book {
+  background: #fff;
+  color: var(--navy);
+}
+
+.picked-tall {
+  align-items: flex-start;
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+
+.picked-tall small {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.picked-tall small.price {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.lookup-results small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.note-warn {
+  margin: 8px 0 0;
+  color: var(--warn);
+}
+
+.note-ok {
+  margin: 8px 0 0;
+  color: var(--ok);
+}

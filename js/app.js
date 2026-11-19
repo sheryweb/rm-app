@@ -619,6 +619,7 @@ function unitRow(unit) {
           title: unit.title,
           projectId: unit.projectId,
           projectName: unit.projectName,
+          status: unit.status,
           multiOfferAllowed: unit.multiOfferAllowed !== false
         })
       )
@@ -730,7 +731,18 @@ function renderOfferBar() {
       <span>${projects === 1 ? esc(units[0].projectName) : projects + " projects"}</span>
     </div>
     <button class="bar-button bar-clear" id="offer-clear">Clear</button>
+    ${
+      units.length === 1 && units[0].status === "available"
+        ? `<button class="bar-button bar-book" id="offer-book">Book</button>`
+        : ""
+    }
     <button class="bar-button bar-go" id="offer-go">Sales Offer</button>`;
+  const book = document.getElementById("offer-book");
+  if (book) {
+    book.addEventListener("click", () =>
+      go("booking-new", { unit: units[0].id })
+    );
+  }
   document
     .getElementById("offer-clear")
     .addEventListener("click", clearOfferSelection);
@@ -1875,6 +1887,7 @@ async function renderClient(token, params) {
       </div>
       ${contact ? `<div class="actions">${contact}</div>` : ""}
     </div>
+    <a class="button-primary button-link start-booking" href="#/booking-new?client=${esc(client.id)}">Start Booking</a>
     ${bookingNote}
     ${layoutSections(
       record,
@@ -2076,6 +2089,380 @@ async function renderClientNew(token, params) {
     event.preventDefault();
     submit(false);
   });
+}
+
+// ------------------------------------------------------------- book a unit
+// The app's version of the "Book this Unit" button in Salesforce: the same questions (client,
+// assisted by agent, agency, agent). It can start from a unit or from a client. Booking cannot
+// be undone from here, so the RM always passes a review screen first.
+
+async function renderBookingNew(token, params) {
+  const fromClient = params.get("client") || "";
+  const fromUnit = params.get("unit") || "";
+  const back = fromClient ? "#/client?id=" + fromClient : "#/units";
+  shell("Book a Unit", loading(), fromClient ? "clients" : "units", { back });
+  const [unitStart, clientStart] = await Promise.all([
+    fromUnit ? get("bookings/unit", { id: fromUnit }) : null,
+    fromClient ? get("clients/detail", { id: fromClient }) : null
+  ]);
+  if (token !== renderToken) {
+    return;
+  }
+  const screen = document.getElementById("screen");
+  const state = {
+    step: "form",
+    unit: unitStart,
+    client: clientStart,
+    assisted: false,
+    agency: null,
+    agent: null,
+    error: "",
+    result: null
+  };
+
+  const unitFacts = (u) =>
+    [
+      u.projectName,
+      u.building,
+      u.floor ? "Floor " + u.floor : null,
+      u.type,
+      u.bedrooms == null
+        ? null
+        : u.bedrooms === 0
+          ? "Studio"
+          : u.bedrooms + " bed",
+      u.areaSqFt == null ? null : wholeNumber.format(u.areaSqFt) + " sq ft"
+    ]
+      .filter(Boolean)
+      .join(" · ");
+
+  const pickedBox = (key, title, line, extra) => `
+    <div class="picked picked-tall">
+      <span><b>${esc(title)}</b>${line ? `<br /><small>${esc(line)}</small>` : ""}${extra || ""}</span>
+      <button type="button" class="picked-clear" data-clear="${key}" aria-label="Change">✕</button>
+    </div>`;
+
+  const searchBox = (key, placeholder) => `
+    <input class="search" type="search" data-lookup="${key}" placeholder="${esc(placeholder)}" autocomplete="off" />
+    <div class="lookup-results" data-results="${key}"></div>`;
+
+  function gapsNote() {
+    const gaps = state.client && state.client.bookingForm;
+    if (!gaps) {
+      return "";
+    }
+    if (gaps.noPrimaryContact) {
+      return `<p class="muted note-warn">Booking form: this company has no primary contact yet. You can book now and add the contact before generating the booking form.</p>`;
+    }
+    if ((gaps.missing || []).length) {
+      return `<p class="muted note-warn">Booking form: ${gaps.missing.length} due diligence ${gaps.missing.length === 1 ? "detail is" : "details are"} still missing for this client. You can book now and complete them before generating the booking form.</p>`;
+    }
+    return `<p class="muted note-ok">Booking form: this client's due diligence is complete.</p>`;
+  }
+
+  function formScreen() {
+    return `
+      <div class="card form">
+        <div class="form-field">
+          <span>Unit *</span>
+          ${
+            state.unit
+              ? pickedBox(
+                  "unit",
+                  state.unit.title,
+                  unitFacts(state.unit),
+                  `<br /><small class="price">${esc(money(state.unit.price, state.unit.currencyCode))}</small>`
+                ) +
+                (state.unit.bookable
+                  ? ""
+                  : errorBox(
+                      state.unit.reason || "This unit cannot be booked."
+                    ))
+              : searchBox("unit", "Search available units…")
+          }
+        </div>
+        <div class="form-field">
+          <span>Client *</span>
+          ${
+            state.client
+              ? pickedBox(
+                  "client",
+                  state.client.name,
+                  state.client.kind === "company" ? "Company" : "Individual",
+                  ""
+                ) + gapsNote()
+              : searchBox(
+                  "client",
+                  "Search clients by name, phone, email or passport…"
+                ) +
+                `<p class="muted">Client not in the list? <a href="#/client-new">Add the client first</a>, then start the booking from the client's page.</p>`
+          }
+        </div>
+        <label class="form-check">
+          <input type="checkbox" id="assisted"${state.assisted ? " checked" : ""} />
+          <span>Assisted by Agent</span>
+        </label>
+        ${
+          state.assisted
+            ? `<div class="form-field">
+                 <span>Agency *</span>
+                 ${state.agency ? pickedBox("agency", state.agency.name, "", "") : searchBox("agency", "Search agencies…")}
+               </div>
+               <div class="form-field">
+                 <span>Agent *</span>
+                 ${
+                   !state.agency
+                     ? `<p class="muted">Choose the agency first.</p>`
+                     : state.agent
+                       ? pickedBox("agent", state.agent.name, "", "")
+                       : searchBox("agent", "Search the agency's agents…")
+                 }
+               </div>`
+            : ""
+        }
+        <div id="form-status">${state.error ? errorBox(state.error) : ""}</div>
+        <button type="button" class="button-primary" id="to-review">Review Booking</button>
+        <a class="button-outline button-link" href="${esc(back)}">Cancel</a>
+      </div>`;
+  }
+
+  function reviewScreen() {
+    return `
+      <p class="step-line">Please check before you book</p>
+      <div class="card">
+        ${field("Unit", state.unit.title)}
+        ${field("Project", state.unit.projectName)}
+        ${field("Details", unitFacts(state.unit))}
+        ${field("Price", money(state.unit.price, state.unit.currencyCode))}
+        ${field("Client", state.client.name)}
+        ${field("Assisted by agent", state.assisted ? "Yes" : "No")}
+        ${state.assisted ? field("Agency", state.agency.name) + field("Agent", state.agent.name) : ""}
+      </div>
+      <div class="notice notice-warn notice-left">
+        <b>This cannot be undone here</b>
+        <p>Booking creates the deal in Salesforce and takes the unit out of availability straight away. To reverse a booking a cancellation request is needed.</p>
+      </div>
+      <div class="card form">
+        <div id="form-status">${state.error ? errorBox(state.error) : ""}</div>
+        <button type="button" class="button-primary" id="confirm-booking">Confirm Booking</button>
+        <button type="button" class="button-outline" id="back-to-form">Back</button>
+      </div>`;
+  }
+
+  function doneScreen() {
+    const r = state.result;
+    return `
+      <div class="card">
+        <h2 class="form-title">Unit ${esc(r.unit || "")} is booked</h2>
+        ${field("Client", r.client)}
+        ${field("Project", r.projectName)}
+        ${field("Deal", r.dealName)}
+        ${field("Stage", r.stage)}
+      </div>
+      <a class="button-primary button-link" href="#/deal?id=${esc(r.dealId)}">Open the Deal</a>
+      <a class="button-outline button-link below" href="#/units">Back to Units</a>`;
+  }
+
+  function validate() {
+    if (!state.unit) {
+      return "Please choose the unit.";
+    }
+    if (!state.unit.bookable) {
+      return state.unit.reason || "This unit cannot be booked.";
+    }
+    if (!state.client) {
+      return "Please choose the client.";
+    }
+    if (state.assisted && !state.agency) {
+      return "Please choose the agency, or untick Assisted by Agent.";
+    }
+    if (state.assisted && !state.agent) {
+      return "Please choose the agent.";
+    }
+    return "";
+  }
+
+  const LOOKUPS = {
+    unit: async (term) =>
+      (
+        (
+          await get("units", {
+            status: "available",
+            search: term,
+            pageSize: 10,
+            offset: 0
+          })
+        ).rows || []
+      ).map((u) => ({
+        id: u.id,
+        name: u.title,
+        detail: [u.projectName, money(u.price, u.currencyCode)]
+          .filter(Boolean)
+          .join(" · ")
+      })),
+    client: async (term) =>
+      (
+        (await get("clients", { search: term, pageSize: 10, offset: 0 }))
+          .rows || []
+      ).map((c) => ({
+        id: c.id,
+        name: c.name,
+        detail: [c.kind === "company" ? "Company" : "Individual", c.mobile]
+          .filter(Boolean)
+          .join(" · ")
+      })),
+    agency: (term) => get("bookings/agencies", { search: term }),
+    agent: (term) =>
+      get("bookings/agents", { agencyId: state.agency.id, search: term })
+  };
+
+  function bindLookups() {
+    screen.querySelectorAll("[data-lookup]").forEach((input) => {
+      const key = input.dataset.lookup;
+      const results = screen.querySelector(`[data-results="${key}"]`);
+      let latest = 0;
+      const run = async () => {
+        const term = input.value.trim();
+        const mine = ++latest;
+        // an agency's agents are few: list them at once; the others wait for two letters
+        if (term.length < 2 && key !== "agent") {
+          results.innerHTML = "";
+          return;
+        }
+        try {
+          const found = await LOOKUPS[key](term);
+          if (mine !== latest) {
+            return;
+          }
+          results.innerHTML = found.length
+            ? found
+                .map(
+                  (o) =>
+                    `<button type="button" data-pick="${key}" data-id="${esc(o.id)}" data-name="${esc(o.name)}">${esc(o.name)}${
+                      o.detail ? `<br /><small>${esc(o.detail)}</small>` : ""
+                    }</button>`
+                )
+                .join("")
+            : `<p class="muted">No match.</p>`;
+        } catch (error) {
+          results.innerHTML = errorBox(error.message);
+        }
+      };
+      input.addEventListener("input", debounce(run, 300));
+      if (key === "agent") {
+        run();
+      }
+    });
+  }
+
+  function draw() {
+    screen.innerHTML =
+      state.step === "review"
+        ? reviewScreen()
+        : state.step === "done"
+          ? doneScreen()
+          : formScreen();
+    bindLookups();
+  }
+
+  async function pick(key, id, name) {
+    if (key === "unit" || key === "client") {
+      // read it again in full: the unit's price and whether it is still free, the client's kind
+      const status = document.getElementById("form-status");
+      status.innerHTML = `<div class="working"><span class="spinner"></span><span>Loading…</span></div>`;
+      try {
+        state[key] =
+          key === "unit"
+            ? await get("bookings/unit", { id })
+            : await get("clients/detail", { id });
+      } catch (error) {
+        if (error instanceof SignedOutError) {
+          handleError(error);
+          return;
+        }
+        state.error = error.message;
+      }
+    } else {
+      state[key] = { id, name };
+      if (key === "agency") {
+        state.agent = null;
+      }
+    }
+    if (token === renderToken) {
+      draw();
+    }
+  }
+
+  async function confirm() {
+    const button = document.getElementById("confirm-booking");
+    button.disabled = true;
+    document.getElementById("form-status").innerHTML =
+      `<div class="working"><span class="spinner"></span><span>Booking…</span></div>`;
+    try {
+      state.result = await post("bookings/create", {
+        unitId: state.unit.id,
+        clientId: state.client.id,
+        assistedByAgent: state.assisted,
+        agencyId: state.assisted ? state.agency.id : null,
+        agentId: state.assisted ? state.agent.id : null
+      });
+      state.step = "done";
+      state.error = "";
+      offerSelection.clear();
+      draw();
+      window.scrollTo(0, 0);
+    } catch (error) {
+      if (error instanceof SignedOutError) {
+        handleError(error);
+        return;
+      }
+      state.error = error.message;
+      draw();
+    }
+  }
+
+  screen.addEventListener("change", (event) => {
+    if (event.target.id === "assisted") {
+      state.assisted = event.target.checked;
+      state.error = "";
+      draw();
+    }
+  });
+  screen.addEventListener("click", (event) => {
+    const el = event.target.closest("button");
+    if (!el || !screen.contains(el)) {
+      return;
+    }
+    const d = el.dataset;
+    if (d.pick) {
+      state.error = "";
+      pick(d.pick, d.id, d.name);
+      return;
+    }
+    if (d.clear) {
+      state[d.clear] = null;
+      if (d.clear === "agency") {
+        state.agent = null;
+      }
+      state.error = "";
+    } else if (el.id === "to-review") {
+      state.error = validate();
+      if (!state.error) {
+        state.step = "review";
+        window.scrollTo(0, 0);
+      }
+    } else if (el.id === "back-to-form") {
+      state.step = "form";
+      state.error = "";
+    } else if (el.id === "confirm-booking") {
+      confirm();
+      return;
+    } else {
+      return;
+    }
+    draw();
+  });
+  draw();
 }
 
 // ----------------------------------------------------------- sales activities
@@ -3003,6 +3390,8 @@ async function render() {
       await renderContactNew(token, params);
     } else if (path === "edit") {
       await renderEdit(token, params);
+    } else if (path === "booking-new") {
+      await renderBookingNew(token, params);
     } else if (path === "activities") {
       renderActivities(token);
     } else if (path === "activity-new") {
