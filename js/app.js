@@ -1062,13 +1062,250 @@ async function renderDeal(token, params) {
       ${field("Shared with", deal.sharedWith)}
       ${field("Created", shortDate(deal.createdDate))}
     </div>
+    <div id="buyers-box"></div>
     <div id="booking-form-box"></div>
     ${
       deal.clientId
         ? `<a class="button-outline button-link" href="#/client?id=${esc(deal.clientId)}&from=deal:${esc(deal.id)}">Open Client</a>`
         : ""
     }`;
+  buyersBox(deal, token);
   bookingFormBox(deal, token);
+}
+
+// ------------------------------------------------------- buyers of a deal
+// The main purchaser's ownership share and the joint owners, which the booking form prints.
+
+function shareText(value) {
+  return value === null || value === undefined ? "—" : value + "%";
+}
+
+async function buyersBox(deal, token) {
+  const box = document.getElementById("buyers-box");
+  let view;
+  try {
+    view = await get("deals/owners", { id: deal.id });
+  } catch (error) {
+    if (token === renderToken && box) {
+      box.innerHTML = errorBox(
+        "The buyers could not be loaded: " + error.message
+      );
+    }
+    return;
+  }
+  if (token !== renderToken || !box) {
+    return;
+  }
+  const owners = view.owners || [];
+  box.innerHTML = `
+    <div class="card form">
+      <h2 class="form-title">Buyers</h2>
+      <p class="kv"><span>${esc(view.mainName || "Main purchaser")}<br /><small>Main purchaser</small></span><b>${shareText(view.mainShare)}</b></p>
+      ${owners
+        .map(
+          (o) =>
+            `<p class="kv"><span>${esc(o.name)}<br /><small>Joint owner</small></span><b>${shareText(o.share)}</b></p>`
+        )
+        .join("")}
+      ${
+        owners.length && view.total !== 100
+          ? `<p class="muted note-warn">The shares add up to ${esc(view.total)}%, not 100%.</p>`
+          : ""
+      }
+      ${
+        view.canEdit
+          ? `<a class="button-outline button-link" href="#/deal-owners?id=${esc(deal.id)}">${owners.length ? "Edit Buyers" : "Add Joint Owner"}</a>`
+          : ""
+      }
+    </div>`;
+}
+
+async function renderDealOwners(token, params) {
+  const dealId = params.get("id");
+  const back = "#/deal?id=" + dealId;
+  shell("Buyers", loading(), "deals", { back });
+  const view = await get("deals/owners", { id: dealId });
+  if (token !== renderToken) {
+    return;
+  }
+  if (!view.canEdit) {
+    throw new Error("You cannot change the buyers of this deal.");
+  }
+  const screen = document.getElementById("screen");
+  const asText = (n) => (n === null || n === undefined ? "" : String(n));
+  const state = {
+    mainShare: asText(view.mainShare),
+    owners: (view.owners || []).map((o) => ({
+      accountId: o.accountId,
+      name: o.name,
+      share: asText(o.share)
+    })),
+    error: ""
+  };
+  const number = (text) => {
+    const typed = String(text).trim();
+    return typed === "" || Number.isNaN(Number(typed)) ? null : Number(typed);
+  };
+  const total = () =>
+    [state.mainShare, ...state.owners.map((o) => o.share)].reduce(
+      (sum, text) => sum + (number(text) || 0),
+      0
+    );
+  const totalLine = () => {
+    const sum = Math.round(total() * 100) / 100;
+    return sum === 100
+      ? `<p class="muted note-ok" id="share-total">Total: 100%</p>`
+      : `<p class="muted note-warn" id="share-total">Total: ${sum}%. The shares should add up to 100%.</p>`;
+  };
+
+  function draw() {
+    screen.innerHTML = `
+      <div class="card form">
+        <h2 class="form-title">Ownership Shares</h2>
+        <div class="owner-row">
+          <span><b>${esc(view.mainName || "Main purchaser")}</b><br /><small>Main purchaser</small></span>
+          <label class="share-input"><input class="search" type="text" inputmode="decimal" data-share="main" value="${esc(state.mainShare)}" autocomplete="off" aria-label="Share of the main purchaser" /><i>%</i></label>
+        </div>
+        ${state.owners
+          .map(
+            (o, i) => `
+          <div class="owner-row">
+            <span><b>${esc(o.name)}</b><br /><small>Joint owner ${i + 1}</small></span>
+            <label class="share-input"><input class="search" type="text" inputmode="decimal" data-share="${i}" value="${esc(o.share)}" autocomplete="off" aria-label="Share of ${esc(o.name)}" /><i>%</i></label>
+            <button type="button" class="picked-clear" data-remove="${i}" aria-label="Remove ${esc(o.name)}">✕</button>
+          </div>`
+          )
+          .join("")}
+        ${totalLine()}
+        <div class="form-field">
+          <span>Add a joint owner</span>
+          <input class="search" type="search" id="owner-search" placeholder="Search clients by name, phone, email or passport…" autocomplete="off" />
+          <div class="lookup-results" id="owner-results"></div>
+          <p class="muted">Client not in the list? <a href="#/client-new">Add the client first</a>, then come back to this deal.</p>
+        </div>
+        <div id="form-status">${state.error ? errorBox(state.error) : ""}</div>
+        <button type="button" class="button-primary" id="owners-save">Save Buyers</button>
+        <a class="button-outline button-link" href="${esc(back)}">Cancel</a>
+      </div>
+      <p class="hint">Each joint owner also needs their Customer Due Diligence filled in before the booking form can be generated. The deal page lists what is missing.</p>`;
+
+    screen.querySelectorAll("[data-share]").forEach((input) =>
+      input.addEventListener("input", () => {
+        if (input.dataset.share === "main") {
+          state.mainShare = input.value;
+        } else {
+          state.owners[Number(input.dataset.share)].share = input.value;
+        }
+        document.getElementById("share-total").outerHTML = totalLine();
+      })
+    );
+    const search = document.getElementById("owner-search");
+    const results = document.getElementById("owner-results");
+    let latest = 0;
+    search.addEventListener(
+      "input",
+      debounce(async () => {
+        const term = search.value.trim();
+        const mine = ++latest;
+        if (term.length < 2) {
+          results.innerHTML = "";
+          return;
+        }
+        try {
+          const page = await get("clients", {
+            search: term,
+            pageSize: 10,
+            offset: 0
+          });
+          if (mine !== latest) {
+            return;
+          }
+          const taken = [
+            view.mainAccountId,
+            ...state.owners.map((o) => o.accountId)
+          ];
+          const rows = (page.rows || []).filter((c) => !taken.includes(c.id));
+          results.innerHTML = rows.length
+            ? rows
+                .map(
+                  (c) =>
+                    `<button type="button" data-add="${esc(c.id)}" data-name="${esc(c.name)}">${esc(c.name)}<br /><small>${esc(
+                      [
+                        c.kind === "company" ? "Company" : "Individual",
+                        c.mobile
+                      ]
+                        .filter(Boolean)
+                        .join(" · ")
+                    )}</small></button>`
+                )
+                .join("")
+            : `<p class="muted">No match.</p>`;
+        } catch (error) {
+          results.innerHTML = errorBox(error.message);
+        }
+      }, 300)
+    );
+  }
+
+  async function save() {
+    const main = number(state.mainShare);
+    if (main === null) {
+      state.error = "Please enter the ownership share of the main purchaser.";
+      draw();
+      return;
+    }
+    const blank = state.owners.find((o) => number(o.share) === null);
+    if (blank) {
+      state.error = "Please enter the ownership share of " + blank.name + ".";
+      draw();
+      return;
+    }
+    document.getElementById("owners-save").disabled = true;
+    document.getElementById("form-status").innerHTML =
+      `<div class="working"><span class="spinner"></span><span>Saving…</span></div>`;
+    try {
+      await post("deals/owners/save", {
+        dealId,
+        mainShare: main,
+        owners: state.owners.map((o) => ({
+          accountId: o.accountId,
+          share: number(o.share)
+        }))
+      });
+      toast("Buyers saved.");
+      location.hash = back;
+    } catch (error) {
+      if (error instanceof SignedOutError) {
+        handleError(error);
+        return;
+      }
+      state.error = error.message;
+      draw();
+    }
+  }
+
+  screen.addEventListener("click", (event) => {
+    const el = event.target.closest("button");
+    if (!el || !screen.contains(el)) {
+      return;
+    }
+    if (el.dataset.add) {
+      state.owners.push({
+        accountId: el.dataset.add,
+        name: el.dataset.name,
+        share: ""
+      });
+      state.error = "";
+      draw();
+    } else if (el.dataset.remove) {
+      state.owners.splice(Number(el.dataset.remove), 1);
+      state.error = "";
+      draw();
+    } else if (el.id === "owners-save") {
+      save();
+    }
+  });
+  draw();
 }
 
 /**
@@ -3549,6 +3786,8 @@ async function render() {
       await renderContactNew(token, params);
     } else if (path === "edit") {
       await renderEdit(token, params);
+    } else if (path === "deal-owners") {
+      await renderDealOwners(token, params);
     } else if (path === "booking-new") {
       await renderBookingNew(token, params);
     } else if (path === "activities") {

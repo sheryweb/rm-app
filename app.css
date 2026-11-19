@@ -1376,3 +1376,56 @@ a.button-outline {
 #booking-form-box .button-primary {
   margin-top: 10px;
 }
+
+/* ---------- buyers of a deal ---------- */
+
+#buyers-box {
+  margin-bottom: 12px;
+}
+
+#buyers-box .kv {
+  align-items: center;
+  border-top: 1px solid var(--line);
+  padding: 9px 0;
+}
+
+#buyers-box .kv small,
+.owner-row small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+#buyers-box .button-outline {
+  margin-top: 10px;
+}
+
+.owner-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.owner-row > span {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.share-input {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.share-input .search {
+  width: 76px;
+  text-align: right;
+}
+
+.share-input i {
+  font-style: normal;
+  color: var(--muted);
+}
