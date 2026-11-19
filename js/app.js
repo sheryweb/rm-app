@@ -1533,7 +1533,8 @@ async function renderRequestPrice(token, params) {
   // the same arithmetic as Salesforce: whole amounts, rounded half up
   const discounted = (percent) =>
     Math.round(info.currentPrice * (1 - percent / 100));
-  const hasManager = Boolean(view.lineManager);
+  // System Administrator and Sales Admin pick the first approver; everyone else needs a manager
+  const canSubmit = Boolean(view.approvers || view.lineManager);
   screen.innerHTML = `
     ${summary}
     <form class="card form" id="request-form" novalidate>
@@ -1554,9 +1555,9 @@ async function renderRequestPrice(token, params) {
         <span>Justification * (at least 10 characters)</span>
         <textarea class="search" rows="4" id="request-justification" maxlength="2000" placeholder="Why should the price change?"></textarea>
       </label>
-      ${approverPart({ lineManager: view.lineManager })}
+      ${approverPart(view)}
       <div id="form-status"></div>
-      ${hasManager ? `<button class="button-primary" type="submit" id="request-submit">Submit for Approval</button>` : ""}
+      ${canSubmit ? `<button class="button-primary" type="submit" id="request-submit">Submit for Approval</button>` : ""}
       <a class="button-outline button-link" href="${esc(back)}">Cancel</a>
     </form>`;
 
@@ -1579,11 +1580,14 @@ async function renderRequestPrice(token, params) {
     const justification = document
       .getElementById("request-justification")
       .value.trim();
+    const approver = document.getElementById("request-approver");
     const problem = !percent
       ? "Please choose the discount."
       : justification.length < 10
         ? "Please write a justification of at least 10 characters."
-        : "";
+        : approver && !approver.value
+          ? "Please choose the first approver."
+          : "";
     if (problem) {
       status.innerHTML = errorBox(problem);
       return;
@@ -1595,7 +1599,8 @@ async function renderRequestPrice(token, params) {
       await post("requests/unitprice/submit", {
         dealId,
         discountPercent: percent,
-        justification
+        justification,
+        approverId: approver ? approver.value : null
       });
       toast("Unit price change request submitted.");
       location.hash = back;
