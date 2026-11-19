@@ -93,6 +93,45 @@ export async function data(path) {
   return readJson(response);
 }
 
+/**
+ * Creates (POST) or updates (PATCH) a record through Salesforce's own data services as the
+ * signed-in RM: Salesforce's permissions, validation rules and triggers all apply as usual.
+ */
+export async function change(method, path, body) {
+  const response = await authorized(
+    (base) => base + "/services/data/v62.0/" + path,
+    {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {})
+    }
+  );
+  if (response.ok) {
+    return response.status === 204 ? null : response.json();
+  }
+  let answer = null;
+  try {
+    answer = await response.json();
+  } catch (e) {
+    // no readable answer
+  }
+  const first = Array.isArray(answer) ? answer[0] : answer;
+  const output = (first && first.output) || {};
+  const lines = (output.errors || []).map((error) => error.message);
+  Object.values(output.fieldErrors || {}).forEach((list) =>
+    list.forEach((error) =>
+      lines.push(
+        (error.fieldLabel ? error.fieldLabel + ": " : "") + error.message
+      )
+    )
+  );
+  throw new Error(
+    lines.filter(Boolean).join(" ") ||
+      (first && first.message) ||
+      "The record could not be saved (" + response.status + ")."
+  );
+}
+
 /** Downloads a Salesforce file (by ContentVersion id) with the RM's login; returns a File. */
 export async function downloadFile(contentVersionId, fileName, mimeType) {
   const response = await authorized(

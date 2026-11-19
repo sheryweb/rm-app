@@ -6,7 +6,14 @@ import {
   completeLoginIfReturning,
   signOut
 } from "./auth.js";
-import { get, post, data, downloadFile, SignedOutError } from "./api.js";
+import {
+  get,
+  post,
+  data,
+  change,
+  downloadFile,
+  SignedOutError
+} from "./api.js";
 
 const root = document.getElementById("app");
 const PAGE_SIZE = 25;
@@ -1179,7 +1186,7 @@ function layoutSectionItems(section) {
   return columns.flat();
 }
 
-function layoutSections(record, layout) {
+function layoutSections(record, layout, editHref) {
   return layout.sections
     .map((section, index) => {
       const items = layoutSectionItems(section);
@@ -1204,10 +1211,475 @@ function layoutSections(record, layout) {
             <span>${esc(section.heading)}</span>
             <small>${filled} of ${items.length} filled</small>
           </summary>
+          ${
+            editHref && items.some((item) => item.editableForUpdate)
+              ? `<a class="action section-edit" href="${esc(editHref(section))}">Edit ${esc(section.heading)}</a>`
+              : ""
+          }
           ${rows}
         </details>`;
     })
     .join("");
+}
+
+// ------------------------------------------------ editing a record, by section
+// The form for a section is built from the same Salesforce layout: its editable fields, their
+// labels, types and picklist choices. Saving goes through Salesforce's own record service, so
+// permissions, validation rules and triggers apply exactly as on the Salesforce page.
+
+const kitCache = new Map();
+const EDITABLE_TYPES = [
+  "String",
+  "TextArea",
+  "Email",
+  "Phone",
+  "Url",
+  "Picklist",
+  "MultiPicklist",
+  "Boolean",
+  "Date",
+  "Double",
+  "Int",
+  "Percent",
+  "Currency"
+];
+const NUMBER_TYPES = ["Double", "Int", "Percent", "Currency"];
+
+async function cached(key, load) {
+  if (!kitCache.has(key)) {
+    kitCache.set(key, load());
+  }
+  try {
+    return await kitCache.get(key);
+  } catch (error) {
+    kitCache.delete(key);
+    throw error;
+  }
+}
+
+function objectInfo(objectName) {
+  return cached("info:" + objectName, () =>
+    data("ui-api/object-info/" + objectName)
+  );
+}
+
+/** Everything needed to build a form: field facts, the edit layout and the picklist choices. */
+async function editKit(objectName, recordTypeId) {
+  const info = await objectInfo(objectName);
+  const recordType = recordTypeId || info.defaultRecordTypeId;
+  const [layout, picks] = await Promise.all([
+    cached("edit:" + objectName + ":" + recordType, () =>
+      data(
+        "ui-api/layout/" +
+          objectName +
+          "?layoutType=Full&mode=Edit&recordTypeId=" +
+          recordType
+      )
+    ),
+    cached("picks:" + objectName + ":" + recordType, () =>
+      data(
+        "ui-api/object-info/" + objectName + "/picklist-values/" + recordType
+      )
+    )
+  ]);
+  return { info, layout, picks: picks.picklistFieldValues || {}, recordType };
+}
+
+/** The fields of a section the RM may fill, in reading order. */
+function editableParts(kit, section, isNew) {
+  const parts = [];
+  layoutSectionItems(section).forEach((item) => {
+    if (!(isNew ? item.editableForNew : item.editableForUpdate)) {
+      return;
+    }
+    const components = item.layoutComponents.filter(
+      (part) => part.componentType === "Field" && part.apiName
+    );
+    components.forEach((part) => {
+      const fact = kit.info.fields[part.apiName];
+      if (
+        !fact ||
+        !(isNew ? fact.createable : fact.updateable) ||
+        !EDITABLE_TYPES.includes(fact.dataType)
+      ) {
+        return;
+      }
+      parts.push({
+        apiName: part.apiName,
+        fact,
+        label: components.length > 1 ? fact.label : item.label,
+        required: item.required && (components.length === 1 || fact.required)
+      });
+    });
+  });
+  return parts;
+}
+
+function partInput(kit, part, value) {
+  const { apiName, fact, label, required } = part;
+  const type = fact.dataType;
+  const mark = `data-field="${esc(apiName)}" data-type="${type}" data-label="${esc(label)}"`;
+  const head = `<span>${esc(label)}${required ? " *" : ""}</span>`;
+  const need = required ? " required" : "";
+  const text = value === null || value === undefined ? "" : String(value);
+  if (type === "Boolean") {
+    return `
+      <label class="form-check">
+        <input type="checkbox" ${mark}${value ? " checked" : ""} />
+        <span>${esc(label)}</span>
+      </label>`;
+  }
+  if (type === "Picklist" || type === "MultiPicklist") {
+    const choices = ((kit.picks[apiName] || {}).values || []).map((c) => ({
+      value: c.value,
+      label: c.label
+    }));
+    const chosen = type === "MultiPicklist" ? text.split(";") : [text];
+    chosen
+      .filter((v) => v && !choices.some((c) => c.value === v))
+      .forEach((v) => choices.push({ value: v, label: v }));
+    if (type === "MultiPicklist") {
+      return `
+        <div class="form-field" ${mark}>
+          ${head}
+          <div class="checks">${choices
+            .map(
+              (c) => `
+            <label class="form-check">
+              <input type="checkbox" value="${esc(c.value)}"${chosen.includes(c.value) ? " checked" : ""} />
+              <span>${esc(c.label)}</span>
+            </label>`
+            )
+            .join("")}</div>
+        </div>`;
+    }
+    return `
+      <label class="form-field">
+        ${head}
+        <select class="select" ${mark}${need}>
+          <option value="">None</option>
+          ${choices
+            .map(
+              (c) =>
+                `<option value="${esc(c.value)}"${c.value === text ? " selected" : ""}>${esc(c.label)}</option>`
+            )
+            .join("")}
+        </select>
+      </label>`;
+  }
+  if (type === "TextArea") {
+    return `
+      <label class="form-field">
+        ${head}
+        <textarea class="search" rows="3" ${mark}${need}>${esc(text)}</textarea>
+      </label>`;
+  }
+  const kind =
+    type === "Date"
+      ? `type="date"`
+      : type === "Email"
+        ? `type="email" inputmode="email"`
+        : type === "Phone"
+          ? `type="tel" inputmode="tel"`
+          : type === "Url"
+            ? `type="url" inputmode="url"`
+            : NUMBER_TYPES.includes(type)
+              ? `type="text" inputmode="decimal"`
+              : `type="text"`;
+  const limit =
+    type === "String" && fact.length ? ` maxlength="${fact.length}"` : "";
+  return `
+    <label class="form-field">
+      ${head}
+      <input class="search" ${kind} ${mark}${need}${limit} autocomplete="off" value="${esc(text)}" />
+    </label>`;
+}
+
+/** What the RM entered, field by field; an empty box means "no value". */
+function readParts(form) {
+  const values = {};
+  form.querySelectorAll("[data-field]").forEach((el) => {
+    const type = el.dataset.type;
+    let value;
+    if (type === "Boolean") {
+      value = el.checked;
+    } else if (type === "MultiPicklist") {
+      value =
+        [...el.querySelectorAll("input:checked")]
+          .map((box) => box.value)
+          .join(";") || null;
+    } else {
+      const typed = el.value.trim();
+      value = typed === "" ? null : typed;
+      if (value !== null && NUMBER_TYPES.includes(type)) {
+        value = Number(typed.replace(/,/g, ""));
+        if (Number.isNaN(value)) {
+          throw new Error(el.dataset.label + " must be a number.");
+        }
+      }
+    }
+    values[el.dataset.field] = value;
+  });
+  return values;
+}
+
+function missingRequired(form) {
+  const empty = [...form.querySelectorAll("[required]")].find(
+    (el) => !el.value.trim()
+  );
+  if (empty) {
+    empty.focus();
+    return empty.dataset.label + " is required.";
+  }
+  return "";
+}
+
+function recordTypeName(kit, recordTypeId) {
+  const found = (kit.info.recordTypeInfos || {})[recordTypeId];
+  return found ? found.name : "";
+}
+
+async function renderEdit(token, params) {
+  const id = params.get("id");
+  const wizard = params.get("wizard") === "1";
+  const clientId = params.get("client") || "";
+  shell(wizard ? "Add Client" : "Edit", loading(), "clients", {
+    back: "#/clients"
+  });
+  if (!SALESFORCE_ID.test(id || "")) {
+    throw new Error("This record could not be found.");
+  }
+  const record = await data(
+    "ui-api/records/" + id + "?layoutTypes=Full&modes=Edit"
+  );
+  const kit = await editKit(record.apiName, record.recordTypeId);
+  if (token !== renderToken) {
+    return;
+  }
+  const isContact = record.apiName === "Contact";
+  const isCompany =
+    !isContact && recordTypeName(kit, record.recordTypeId) === "Company";
+  const detail = isContact
+    ? "#/contact?id=" + id + (clientId ? "&client=" + clientId : "")
+    : "#/client?id=" + id;
+  const steps = kit.layout.sections
+    .map((section) => ({ section, parts: editableParts(kit, section, false) }))
+    .filter((step) => step.parts.length);
+  if (!steps.length) {
+    throw new Error("There is nothing you can edit on this record.");
+  }
+  const wanted = params.get("s");
+  const index = Math.max(
+    0,
+    steps.findIndex((step) => step.section.id === wanted)
+  );
+  const { section, parts } = steps[index];
+  const before = {};
+  parts.forEach((part) => {
+    const entry = record.fields[part.apiName];
+    before[part.apiName] = entry ? entry.value : null;
+  });
+
+  // in the add flow, step 1 was the short form; a company ends with its contact
+  const stepNumber = isContact ? index + 1 : index + 2;
+  const stepTotal = isContact
+    ? steps.length
+    : steps.length + 1 + (isCompany ? 1 : 0);
+  const stepLine = wizard
+    ? `<p class="steps">${isContact ? "Contact · " : ""}Step ${stepNumber} of ${stepTotal}</p>`
+    : "";
+
+  shell(
+    wizard ? (isContact ? "Add Contact" : "Add Client") : "Edit",
+    "",
+    "clients",
+    { back: detail }
+  );
+  document.getElementById("screen").innerHTML = `
+    ${stepLine}
+    <form class="card form" id="edit-form" novalidate>
+      <h2 class="form-title">${esc(section.heading)}</h2>
+      ${parts.map((part) => partInput(kit, part, before[part.apiName])).join("")}
+      <div id="form-status"></div>
+      <button class="button-primary" type="submit" id="edit-save">${wizard ? "Save and Next" : "Save"}</button>
+      ${
+        wizard
+          ? `<button class="button-outline" type="button" id="edit-skip">Skip for Now</button>`
+          : `<a class="button-outline button-link" href="${esc(detail)}">Cancel</a>`
+      }
+    </form>
+    ${wizard ? `<p class="hint">Each step is saved when you press Save and Next. You can stop at any time and complete the rest later from the client's page. <a href="${esc(detail)}">Finish later</a></p>` : ""}`;
+
+  const form = document.getElementById("edit-form");
+  const status = document.getElementById("form-status");
+  const saveButton = document.getElementById("edit-save");
+
+  function onward() {
+    if (!wizard) {
+      location.hash = detail;
+      return;
+    }
+    const next = steps[index + 1];
+    if (next) {
+      go("edit", {
+        id,
+        s: next.section.id,
+        wizard: "1",
+        client: clientId
+      });
+    } else if (isCompany) {
+      go("contact-new", { client: id, wizard: "1" });
+    } else {
+      toast(isContact ? "Contact saved." : "All steps done.");
+      location.hash =
+        isContact && clientId ? "#/client?id=" + clientId : detail;
+    }
+  }
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const missing = missingRequired(form);
+    if (missing) {
+      status.innerHTML = errorBox(missing);
+      return;
+    }
+    let changed;
+    try {
+      const now = readParts(form);
+      changed = {};
+      Object.keys(now).forEach((name) => {
+        const was = before[name] === undefined ? null : before[name];
+        if (now[name] !== was && !(now[name] === false && was === null)) {
+          changed[name] = now[name];
+        }
+      });
+    } catch (error) {
+      status.innerHTML = errorBox(error.message);
+      return;
+    }
+    if (!Object.keys(changed).length) {
+      onward();
+      return;
+    }
+    saveButton.disabled = true;
+    status.innerHTML = `<div class="working"><span class="spinner"></span><span>Saving…</span></div>`;
+    try {
+      await change("PATCH", "ui-api/records/" + id, { fields: changed });
+      toast("Saved.");
+      onward();
+    } catch (error) {
+      if (error instanceof SignedOutError) {
+        handleError(error);
+        return;
+      }
+      status.innerHTML = errorBox(error.message);
+      saveButton.disabled = false;
+    }
+  });
+  const skip = document.getElementById("edit-skip");
+  if (skip) {
+    skip.addEventListener("click", onward);
+  }
+}
+
+/** A new contact on a company: the first section of the Contact layout, then the other steps. */
+async function renderContactNew(token, params) {
+  const clientId = params.get("client") || "";
+  const wizard = params.get("wizard") === "1";
+  const detail = "#/client?id=" + clientId;
+  shell("Add Contact", loading(), "clients", { back: detail });
+  if (!SALESFORCE_ID.test(clientId)) {
+    throw new Error("This company could not be found.");
+  }
+  const info = await objectInfo("Contact");
+  const clientType = Object.values(info.recordTypeInfos || {}).find(
+    (type) => type.name === "Client" && type.available
+  );
+  const [kit, existing] = await Promise.all([
+    editKit("Contact", clientType ? clientType.recordTypeId : null),
+    companyContacts(clientId)
+  ]);
+  if (token !== renderToken) {
+    return;
+  }
+  const steps = kit.layout.sections
+    .map((section) => ({ section, parts: editableParts(kit, section, true) }))
+    .filter((step) => step.parts.length);
+  if (!steps.length) {
+    throw new Error("You cannot add a contact here.");
+  }
+  const { section, parts } = steps[0];
+  const currency = (kit.picks.CurrencyIsoCode || {}).defaultValue;
+  // the first contact of a company is its primary contact unless the RM unticks it
+  const start = (part) =>
+    part.apiName === "Primary__c"
+      ? existing.length === 0
+      : part.apiName === "CurrencyIsoCode" && currency
+        ? currency.value
+        : null;
+  document.getElementById("screen").innerHTML = `
+    ${wizard ? `<p class="steps">Last part · the company's contact</p>` : ""}
+    <form class="card form" id="edit-form" novalidate>
+      <h2 class="form-title">${esc(section.heading)}</h2>
+      ${parts.map((part) => partInput(kit, part, start(part))).join("")}
+      <div id="form-status"></div>
+      <button class="button-primary" type="submit" id="edit-save">${steps.length > 1 ? "Save and Next" : "Save"}</button>
+      <a class="button-outline button-link" href="${esc(detail)}">${wizard ? "Skip for Now" : "Cancel"}</a>
+    </form>
+    <p class="hint">The signatory's due diligence details are kept on the contact. After this step the app takes you through them.</p>`;
+
+  const form = document.getElementById("edit-form");
+  const status = document.getElementById("form-status");
+  const saveButton = document.getElementById("edit-save");
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const missing = missingRequired(form);
+    if (missing) {
+      status.innerHTML = errorBox(missing);
+      return;
+    }
+    let fields;
+    try {
+      fields = { AccountId: clientId };
+      Object.entries(readParts(form)).forEach(([name, value]) => {
+        if (value !== null) {
+          fields[name] = value;
+        }
+      });
+      if (clientType) {
+        fields.RecordTypeId = clientType.recordTypeId;
+      }
+    } catch (error) {
+      status.innerHTML = errorBox(error.message);
+      return;
+    }
+    saveButton.disabled = true;
+    status.innerHTML = `<div class="working"><span class="spinner"></span><span>Saving…</span></div>`;
+    try {
+      const created = await change("POST", "ui-api/records", {
+        apiName: "Contact",
+        fields
+      });
+      toast("Contact saved.");
+      if (steps.length > 1) {
+        go("edit", {
+          id: created.id,
+          s: steps[1].section.id,
+          wizard: "1",
+          client: clientId
+        });
+      } else {
+        location.hash = detail;
+      }
+    } catch (error) {
+      if (error instanceof SignedOutError) {
+        handleError(error);
+        return;
+      }
+      status.innerHTML = errorBox(error.message);
+      saveButton.disabled = false;
+    }
+  });
 }
 
 async function renderContact(token, params) {
@@ -1235,7 +1707,12 @@ async function renderContact(token, params) {
         ${primary ? `<span class="pill pill-info">Primary</span>` : ""}
       </div>
     </div>
-    ${layoutSections(record, layout)}`;
+    ${layoutSections(
+      record,
+      layout,
+      (section) =>
+        "#/edit?id=" + record.id + "&s=" + section.id + "&client=" + clientId
+    )}`;
 }
 
 async function companyContacts(accountId) {
@@ -1304,14 +1781,19 @@ async function renderClient(token, params) {
       </div>
       ${contact ? `<div class="actions">${contact}</div>` : ""}
     </div>
-    ${layoutSections(record, layout)}
+    ${layoutSections(
+      record,
+      layout,
+      (section) => "#/edit?id=" + record.id + "&s=" + section.id
+    )}
     ${
       company
         ? `<h3 class="section-title">Contacts</h3>${
             contactLines
               ? `<div class="card alert-list">${contactLines}</div>`
               : emptyBox("No contacts on this company yet.")
-          }`
+          }
+          <a class="button-outline button-link add-contact" href="#/contact-new?client=${esc(client.id)}">Add Contact</a>`
         : ""
     }
     <h3 class="section-title">Deals</h3>
@@ -1425,7 +1907,7 @@ async function renderClientNew(token, params) {
       <div id="form-status"></div>
       <button class="button-primary" type="submit" id="client-save">Save Client</button>
     </form>
-    <p class="hint">Fields with * are required. The client is saved in Salesforce under your name.</p>`;
+    <p class="hint">Step 1. Fields with * are required. The client is saved in Salesforce under your name, then the app takes you through the remaining details. Each step can be skipped and completed later.</p>`;
 
   root
     .querySelectorAll("[data-newkind]")
@@ -1461,8 +1943,8 @@ async function renderClientNew(token, params) {
     try {
       const result = await post("clients/create", payload);
       if (result.created) {
-        toast("Client saved.");
-        location.hash = "#/client?id=" + result.id;
+        toast("Client saved. Now the remaining details.");
+        location.hash = "#/edit?id=" + result.id + "&wizard=1";
         return;
       }
       // possible duplicates: let the RM open the existing client or create a new one knowingly
@@ -1569,6 +2051,10 @@ async function render() {
       await renderClient(token, params);
     } else if (path === "contact") {
       await renderContact(token, params);
+    } else if (path === "contact-new") {
+      await renderContactNew(token, params);
+    } else if (path === "edit") {
+      await renderEdit(token, params);
     } else if (path === "client-new") {
       await renderClientNew(token, params);
     } else if (path === "me") {
