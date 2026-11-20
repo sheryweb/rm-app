@@ -1080,6 +1080,7 @@ async function renderDeal(token, params) {
              <h2 class="form-title">Raise a Request</h2>
              <a class="button-outline button-link" href="#/request-dld?deal=${esc(deal.id)}">DLD Waiver Request</a>
              <a class="button-outline button-link below" href="#/request-price?deal=${esc(deal.id)}">Unit Price Change</a>
+             <a class="button-outline button-link below" href="#/request-share?deal=${esc(deal.id)}">Share Deal</a>
            </div>`
     }
     <div id="requests-box"></div>
@@ -1611,6 +1612,127 @@ async function renderRequestPrice(token, params) {
         approverId: approver ? approver.value : null
       });
       toast("Unit price change request submitted.");
+      location.hash = back;
+    } catch (error) {
+      if (error instanceof SignedOutError) {
+        handleError(error);
+        return;
+      }
+      status.innerHTML = errorBox(error.message);
+      button.disabled = false;
+    }
+  });
+}
+
+async function renderRequestShare(token, params) {
+  const dealId = params.get("deal");
+  const back = "#/deal?id=" + dealId;
+  shell("Share Deal", loading(), "deals", { back });
+  const view = await get("requests/sharedeal", { dealId });
+  if (token !== renderToken) {
+    return;
+  }
+  const info = view.info || {};
+  const screen = document.getElementById("screen");
+  const half =
+    view.price == null ? "" : money(view.price / 2, view.currencyCode);
+  const summary = `
+    <div class="card">
+      ${field("Deal", info.opportunityName)}
+      ${field("Stage", info.stageName)}
+      ${field("Owner (first RM)", info.ownerName)}
+      ${info.shareDeal ? field("Shared now with", info.sharedRmName) : ""}
+      ${field("Unit price", view.price == null ? "" : money(view.price, view.currencyCode))}
+      ${field("Each RM's credit (50%)", half)}
+    </div>`;
+
+  if (view.open) {
+    screen.innerHTML =
+      summary +
+      openRequestNote(
+        "Share deal request",
+        view.open,
+        field("Second RM asked for", view.open.requestedSharedRmName)
+      );
+    return;
+  }
+  if (view.reason) {
+    screen.innerHTML = summary + errorBox(view.reason);
+    return;
+  }
+
+  const rms = view.rms || [];
+  // System Administrator and Sales Admin pick the first approver; everyone else needs a manager
+  const canSubmit = Boolean(
+    view.approvers || view.selfApprover || view.lineManager
+  );
+  screen.innerHTML = `
+    ${summary}
+    ${
+      info.shareDeal
+        ? `<div class="notice notice-left">This deal is already shared with <b>${esc(info.sharedRmName || "")}</b>. Submitting asks to change the second RM.</div>`
+        : ""
+    }
+    <form class="card form" id="request-form" novalidate>
+      <label class="form-field">
+        <span>Second RM *</span>
+        <select class="select" id="request-rm">
+          <option value="">Select the second RM</option>
+          ${rms.map((rm) => `<option value="${esc(rm.id)}">${esc(rm.name)}</option>`).join("")}
+        </select>
+      </label>
+      <div id="share-preview"></div>
+      <label class="form-field">
+        <span>Justification * (at least 10 characters)</span>
+        <textarea class="search" rows="4" id="request-justification" maxlength="2000" placeholder="Why should this deal be shared?"></textarea>
+      </label>
+      ${approverPart(view)}
+      <div id="form-status"></div>
+      ${canSubmit ? `<button class="button-primary" type="submit" id="request-submit">Submit for Approval</button>` : ""}
+      <a class="button-outline button-link" href="${esc(back)}">Cancel</a>
+    </form>`;
+
+  const form = document.getElementById("request-form");
+  const status = document.getElementById("form-status");
+  const select = document.getElementById("request-rm");
+  select.addEventListener("change", () => {
+    const chosen = rms.find((rm) => rm.id === select.value);
+    document.getElementById("share-preview").innerHTML = chosen
+      ? `<div class="notice notice-left price-preview">
+           <b>The deal will be shared 50/50</b>
+           ${field(info.ownerName || "Owner", half)}
+           ${field(chosen.name, half)}
+         </div>`
+      : "";
+  });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const justification = document
+      .getElementById("request-justification")
+      .value.trim();
+    const approver = document.getElementById("request-approver");
+    const problem = !select.value
+      ? "Please choose the second RM."
+      : justification.length < 10
+        ? "Please write a justification of at least 10 characters."
+        : approver && !approver.value
+          ? "Please choose the first approver."
+          : "";
+    if (problem) {
+      status.innerHTML = errorBox(problem);
+      return;
+    }
+    const button = document.getElementById("request-submit");
+    button.disabled = true;
+    status.innerHTML = `<div class="working"><span class="spinner"></span><span>Submitting…</span></div>`;
+    try {
+      await post("requests/sharedeal/submit", {
+        dealId,
+        sharedRmId: select.value,
+        justification,
+        approverId: approver ? approver.value : null
+      });
+      toast("Share deal request submitted.");
       location.hash = back;
     } catch (error) {
       if (error instanceof SignedOutError) {
@@ -4371,6 +4493,8 @@ async function render() {
       await renderApproval(token, params);
     } else if (path === "request-price") {
       await renderRequestPrice(token, params);
+    } else if (path === "request-share") {
+      await renderRequestShare(token, params);
     } else if (path === "request-dld") {
       await renderRequestDld(token, params);
     } else if (path === "deal-owners") {
