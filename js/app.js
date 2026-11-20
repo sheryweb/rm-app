@@ -1081,6 +1081,7 @@ async function renderDeal(token, params) {
              <a class="button-outline button-link" href="#/request-dld?deal=${esc(deal.id)}">DLD Waiver Request</a>
              <a class="button-outline button-link below" href="#/request-price?deal=${esc(deal.id)}">Unit Price Change</a>
              <a class="button-outline button-link below" href="#/request-share?deal=${esc(deal.id)}">Share Deal</a>
+             <a class="button-outline button-link below" href="#/request-plan?deal=${esc(deal.id)}">Payment Plan Change</a>
            </div>`
     }
     <div id="requests-box"></div>
@@ -1393,6 +1394,7 @@ async function renderApproval(token, params) {
         ${field("Requested on", dateTime12(r.requestDate))}
         ${field("Justification", r.justification)}
       </div>
+      ${planComparison(r.paymentPlan)}
       <div class="card">
         <h2 class="form-title">The Deal</h2>
         ${field("Client", r.client)}
@@ -1743,6 +1745,428 @@ async function renderRequestShare(token, params) {
       button.disabled = false;
     }
   });
+}
+
+/** One instalment line: what it is, when, and how much. */
+function planLineText(line, price, currencyCode) {
+  const percent = Number(line.percent) || 0;
+  const constant = Number(line.constantAmount) || 0;
+  const parts = [shortDate(line.installmentDate)];
+  if (percent) {
+    parts.push(percent + "%");
+    if (price != null) {
+      parts.push(money(Math.round((price * percent) / 100), currencyCode));
+    }
+  }
+  if (constant) {
+    parts.push(
+      currencyCode
+        ? money(constant, currencyCode)
+        : constant.toLocaleString("en-US")
+    );
+  }
+  if (line.isAdditionalPayment) {
+    parts.push("Additional payment");
+  }
+  return parts.filter(Boolean).join(" · ");
+}
+
+async function renderRequestPlan(token, params) {
+  const dealId = params.get("deal");
+  const back = "#/deal?id=" + dealId;
+  shell("Payment Plan Change", loading(), "deals", { back });
+  const view = await get("requests/paymentplan", { dealId });
+  if (token !== renderToken) {
+    return;
+  }
+  const screen = document.getElementById("screen");
+  const summary = `
+    <div class="card">
+      ${field("Unit", [view.project, view.unit].filter(Boolean).join(" · "))}
+      ${field("Unit price", view.price == null ? "" : money(view.price, view.currencyCode))}
+    </div>`;
+  const readOnlyPlan = () => `
+    <div class="card form">
+      <h2 class="form-title">Payment Plan Now</h2>
+      ${
+        (view.lines || []).length
+          ? view.lines
+              .map(
+                (line) => `
+        <div class="owner-row">
+          <span><b>${esc(line.milestoneName)}</b><br /><small>${esc(planLineText(line, view.price, view.currencyCode))}</small></span>
+        </div>`
+              )
+              .join("")
+          : `<p class="muted">This unit has no instalments.</p>`
+      }
+    </div>`;
+
+  if (view.open && view.locked) {
+    screen.innerHTML = `
+      ${summary}
+      <div class="notice notice-warn notice-left">
+        <b>Payment plan change request ${esc(view.open.name || "")} is ${esc(String(view.open.statusLabel || view.open.status || "").toLowerCase())}</b>
+        ${view.open.approvalStageLabel ? `<p>${esc(view.open.approvalStageLabel)}</p>` : ""}
+        ${field("Justification", view.open.justification)}
+        <p>The payment plan is locked until this request is decided.</p>
+      </div>
+      ${readOnlyPlan()}`;
+    return;
+  }
+  if (view.reason) {
+    screen.innerHTML =
+      summary + errorBox(view.reason) + (view.canRequest ? readOnlyPlan() : "");
+    return;
+  }
+
+  const known = new Set(view.knownMilestones || []);
+  const text = (value) =>
+    value === null || value === undefined ? "" : String(value);
+  let nextKey = 1;
+  const state = {
+    rows: (view.lines || []).map((line) => ({
+      key: "r" + nextKey++,
+      cashFlowId: line.cashFlowId,
+      milestoneName: line.milestoneName || "",
+      installmentDate: line.installmentDate || "",
+      percent: text(line.percent),
+      constantAmount: text(line.constantAmount),
+      isAdditionalPayment: line.isAdditionalPayment === true,
+      locked: Number(line.receivedAmount) > 0,
+      isNew: false,
+      removed: false,
+      original: line
+    })),
+    justification: "",
+    approverId: "",
+    editing: null,
+    error: ""
+  };
+  const number = (typed) => {
+    const value = String(typed).trim();
+    return value === "" || Number.isNaN(Number(value)) ? null : Number(value);
+  };
+  const changed = (row) =>
+    !row.isNew &&
+    !row.removed &&
+    (row.milestoneName !== (row.original.milestoneName || "") ||
+      row.installmentDate !== (row.original.installmentDate || "") ||
+      (number(row.percent) || 0) !== (Number(row.original.percent) || 0) ||
+      (number(row.constantAmount) || 0) !==
+        (Number(row.original.constantAmount) || 0) ||
+      row.isAdditionalPayment !== (row.original.isAdditionalPayment === true));
+  const total = () =>
+    Math.round(
+      state.rows
+        .filter((row) => !row.removed)
+        .reduce((sum, row) => sum + (number(row.percent) || 0), 0) * 100
+    ) / 100;
+  const changes = () => {
+    const list = [];
+    state.rows.forEach((row) => {
+      const line = {
+        cashFlowId: row.cashFlowId || null,
+        milestoneName: row.milestoneName.trim(),
+        installmentDate: row.installmentDate,
+        percent: number(row.percent),
+        constantAmount: number(row.constantAmount),
+        isAdditionalPayment: row.isAdditionalPayment
+      };
+      if (row.isNew && !row.removed) {
+        list.push({ ...line, action: "Insert" });
+      } else if (!row.isNew && row.removed) {
+        list.push({ action: "Delete", cashFlowId: row.cashFlowId });
+      } else if (changed(row)) {
+        list.push({ ...line, action: "Update" });
+      }
+    });
+    return list;
+  };
+  const keepTyped = () => {
+    const justification = document.getElementById("request-justification");
+    const approver = document.getElementById("request-approver");
+    if (justification) {
+      state.justification = justification.value;
+    }
+    if (approver) {
+      state.approverId = approver.value;
+    }
+  };
+  const canSubmit = Boolean(
+    view.approvers || view.selfApprover || view.lineManager
+  );
+
+  function drawEditor() {
+    const row = state.editing;
+    const isNew = !state.rows.includes(row);
+    screen.innerHTML = `
+      <form class="card form" id="line-form" novalidate>
+        <h2 class="form-title">${isNew ? "Add Instalment" : "Edit Instalment"}</h2>
+        <label class="form-field">
+          <span>Milestone name *</span>
+          <input class="search" type="text" id="line-name" list="line-names" maxlength="80" value="${esc(row.milestoneName)}" autocomplete="off" />
+          <datalist id="line-names">${[...known].map((name) => `<option value="${esc(name)}"></option>`).join("")}</datalist>
+        </label>
+        <div id="line-name-note"></div>
+        <label class="form-field">
+          <span>Instalment date *</span>
+          <input class="search" type="date" id="line-date" value="${esc(row.installmentDate)}" />
+        </label>
+        <label class="form-field">
+          <span>Percent of the unit price</span>
+          <input class="search" type="text" inputmode="decimal" id="line-percent" value="${esc(row.percent)}" autocomplete="off" />
+        </label>
+        <label class="form-field">
+          <span>Constant amount${view.currencyCode ? " (" + esc(view.currencyCode) + ")" : ""}</span>
+          <input class="search" type="text" inputmode="decimal" id="line-constant" value="${esc(row.constantAmount)}" autocomplete="off" />
+        </label>
+        <label class="check-line"><input type="checkbox" id="line-additional" ${row.isAdditionalPayment ? "checked" : ""} /> <span>Additional payment</span></label>
+        <p class="muted">The year of the instalment is taken from its date.</p>
+        <div id="form-status"></div>
+        <button class="button-primary" type="submit">Save Instalment</button>
+        <button class="button-outline" type="button" id="line-cancel">Cancel</button>
+      </form>`;
+    const name = document.getElementById("line-name");
+    const note = () => {
+      const typed = name.value.trim();
+      document.getElementById("line-name-note").innerHTML =
+        typed && !known.has(typed)
+          ? `<div class="notice notice-warn notice-left">The booking form does not know the name “${esc(typed)}”. Pick a name from the suggestions if you can; with a new name the booking form cannot be generated until the Salesforce admin adds it.</div>`
+          : "";
+    };
+    name.addEventListener("input", note);
+    note();
+    document.getElementById("line-cancel").addEventListener("click", () => {
+      state.editing = null;
+      draw();
+    });
+    document.getElementById("line-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      const typed = {
+        milestoneName: name.value.trim(),
+        installmentDate: document.getElementById("line-date").value,
+        percent: document.getElementById("line-percent").value.trim(),
+        constantAmount: document.getElementById("line-constant").value.trim(),
+        isAdditionalPayment: document.getElementById("line-additional").checked
+      };
+      const percent = number(typed.percent);
+      const constant = number(typed.constantAmount);
+      const problem = !typed.milestoneName
+        ? "Please enter the milestone name."
+        : !typed.installmentDate
+          ? "Please choose the instalment date."
+          : (typed.percent !== "" && percent === null) ||
+              (percent !== null && (percent < 0 || percent > 100))
+            ? "The percent must be a number from 0 to 100."
+            : (typed.constantAmount !== "" && constant === null) ||
+                (constant !== null && constant < 0)
+              ? "The constant amount must be a number."
+              : !percent && !constant
+                ? "Please enter a percent or a constant amount."
+                : "";
+      if (problem) {
+        document.getElementById("form-status").innerHTML = errorBox(problem);
+        return;
+      }
+      Object.assign(row, typed);
+      if (isNew) {
+        state.rows.push(row);
+      }
+      state.editing = null;
+      draw();
+    });
+    window.scrollTo(0, 0);
+  }
+
+  function draw() {
+    if (state.editing) {
+      drawEditor();
+      return;
+    }
+    const sum = total();
+    const pending = changes();
+    screen.innerHTML = `
+      ${summary}
+      <div class="card form">
+        <h2 class="form-title">Instalments</h2>
+        ${state.rows
+          .map((row) => {
+            const tag = row.locked
+              ? `<span class="pill pill-muted">Payment received</span>`
+              : row.removed
+                ? `<span class="pill pill-urgent">Will be removed</span>`
+                : row.isNew
+                  ? `<span class="pill pill-ok">New</span>`
+                  : changed(row)
+                    ? `<span class="pill pill-warn">Changed</span>`
+                    : "";
+            const actions = row.locked
+              ? ""
+              : row.removed
+                ? `<button type="button" class="plan-action" data-undo="${row.key}">Undo</button>`
+                : `<button type="button" class="plan-action" data-edit="${row.key}">Edit</button>
+                   <button type="button" class="picked-clear" data-remove="${row.key}" aria-label="Remove ${esc(row.milestoneName)}">✕</button>`;
+            return `
+          <div class="owner-row${row.removed ? " plan-removed" : ""}">
+            <span><b>${esc(row.milestoneName)}</b> ${tag}<br /><small>${esc(planLineText(row, view.price, view.currencyCode))}</small></span>
+            ${actions}
+          </div>`;
+          })
+          .join("")}
+        <p class="muted ${sum === 100 ? "note-ok" : "note-warn"}">Total: ${sum}% / 100%${sum === 100 ? "" : ". The percentages must add up to exactly 100%."}</p>
+        <button type="button" class="button-outline" id="plan-add">Add Instalment</button>
+      </div>
+      <form class="card form" id="request-form" novalidate>
+        <p class="muted">${
+          pending.length
+            ? `${pending.length} change${pending.length === 1 ? "" : "s"} to send for approval. Nothing changes on the unit until the request is approved.`
+            : "Edit, remove or add an instalment above to start a request."
+        }</p>
+        <label class="form-field">
+          <span>Justification * (at least 10 characters)</span>
+          <textarea class="search" rows="4" id="request-justification" maxlength="2000" placeholder="Why should the payment plan change?">${esc(state.justification)}</textarea>
+        </label>
+        ${approverPart(view)}
+        <div id="form-status">${state.error ? errorBox(state.error) : ""}</div>
+        ${canSubmit ? `<button class="button-primary" type="submit" id="request-submit">Submit for Approval</button>` : ""}
+        <a class="button-outline button-link" href="${esc(back)}">Cancel</a>
+      </form>`;
+    state.error = "";
+    const approver = document.getElementById("request-approver");
+    if (approver) {
+      approver.value = state.approverId;
+    }
+    const rowOf = (key) => state.rows.find((row) => row.key === key);
+    screen.querySelectorAll("[data-edit]").forEach((button) =>
+      button.addEventListener("click", () => {
+        keepTyped();
+        state.editing = rowOf(button.dataset.edit);
+        draw();
+      })
+    );
+    screen.querySelectorAll("[data-remove]").forEach((button) =>
+      button.addEventListener("click", () => {
+        keepTyped();
+        const row = rowOf(button.dataset.remove);
+        if (row.isNew) {
+          state.rows = state.rows.filter((other) => other !== row);
+        } else {
+          row.removed = true;
+        }
+        draw();
+      })
+    );
+    screen.querySelectorAll("[data-undo]").forEach((button) =>
+      button.addEventListener("click", () => {
+        keepTyped();
+        rowOf(button.dataset.undo).removed = false;
+        draw();
+      })
+    );
+    document.getElementById("plan-add").addEventListener("click", () => {
+      keepTyped();
+      state.editing = {
+        key: "r" + nextKey++,
+        cashFlowId: null,
+        milestoneName: "",
+        installmentDate: "",
+        percent: "",
+        constantAmount: "",
+        isAdditionalPayment: false,
+        locked: false,
+        isNew: true,
+        removed: false
+      };
+      draw();
+    });
+    document
+      .getElementById("request-form")
+      .addEventListener("submit", async (event) => {
+        event.preventDefault();
+        keepTyped();
+        const status = document.getElementById("form-status");
+        const list = changes();
+        const approverSelect = document.getElementById("request-approver");
+        const problem = !list.length
+          ? "Make at least one change to the payment plan first."
+          : total() !== 100
+            ? `The percentages must add up to exactly 100%. The total is now ${total()}%.`
+            : state.justification.trim().length < 10
+              ? "Please write a justification of at least 10 characters."
+              : approverSelect && !approverSelect.value
+                ? "Please choose the first approver."
+                : "";
+        if (problem) {
+          status.innerHTML = errorBox(problem);
+          return;
+        }
+        const button = document.getElementById("request-submit");
+        button.disabled = true;
+        status.innerHTML = `<div class="working"><span class="spinner"></span><span>Submitting…</span></div>`;
+        try {
+          await post("requests/paymentplan/submit", {
+            dealId,
+            justification: state.justification.trim(),
+            approverId: approverSelect ? approverSelect.value : null,
+            changes: list
+          });
+          toast("Payment plan change request submitted.");
+          location.hash = back;
+        } catch (error) {
+          if (error instanceof SignedOutError) {
+            handleError(error);
+            return;
+          }
+          status.innerHTML = errorBox(error.message);
+          button.disabled = false;
+        }
+      });
+  }
+  draw();
+}
+
+/** For the approver of a Payment Plan Change: the instalments today next to what is asked. */
+function planComparison(plan) {
+  if (!plan || plan.notApplicable) {
+    return "";
+  }
+  const label = {
+    updated: ["Changed", "pill-warn"],
+    deleted: ["Removed", "pill-urgent"],
+    added: ["New", "pill-ok"]
+  };
+  const rows = (lines, empty) =>
+    (lines || []).length
+      ? lines
+          .map((line) => {
+            const tag = label[line.changeType];
+            return `
+        <div class="owner-row">
+          <span><b>${esc(line.milestoneName || "")}</b> ${tag ? `<span class="pill ${tag[1]}">${tag[0]}</span>` : ""}${line.hasPayments ? ` <span class="pill pill-muted">Payment received</span>` : ""}<br />
+          <small>${esc(
+            [
+              shortDate(line.installmentDate),
+              line.percent ? line.percent + "%" : "",
+              line.amount ? Number(line.amount).toLocaleString("en-US") : ""
+            ]
+              .filter(Boolean)
+              .join(" · ")
+          )}</small></span>
+        </div>`;
+          })
+          .join("")
+      : `<p class="muted">${empty}</p>`;
+  return `
+    <div class="card">
+      <h2 class="form-title">Instalments Today</h2>
+      <p class="muted">Only the instalments this request touches${plan.totalInstallmentCount ? `, out of ${plan.totalInstallmentCount} on the unit` : ""}.</p>
+      ${rows(plan.currentLines, "No existing instalment is changed or removed.")}
+    </div>
+    <div class="card">
+      <h2 class="form-title">Asked For</h2>
+      ${rows(plan.proposedLines, "Nothing is left of these instalments.")}
+    </div>`;
 }
 
 async function requestsBox(deal, token) {
@@ -4493,6 +4917,8 @@ async function render() {
       await renderApproval(token, params);
     } else if (path === "request-price") {
       await renderRequestPrice(token, params);
+    } else if (path === "request-plan") {
+      await renderRequestPlan(token, params);
     } else if (path === "request-share") {
       await renderRequestShare(token, params);
     } else if (path === "request-dld") {

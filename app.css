@@ -1520,3 +1520,40 @@ a.button-outline {
   background: var(--info-bg);
   color: var(--text);
 }
+
+/* ---------- payment plan change ---------- */
+
+.plan-action {
+  flex: none;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.plan-removed > span b,
+.plan-removed > span small {
+  text-decoration: line-through;
+  color: var(--muted);
+}
+
+.owner-row .pill {
+  margin-left: 4px;
+  vertical-align: middle;
+}
+
+.check-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0 10px;
+}
+
+.check-line input {
+  width: 20px;
+  height: 20px;
+}
