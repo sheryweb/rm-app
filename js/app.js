@@ -265,6 +265,7 @@ function field(label, value) {
 function handleError(error, target) {
   if (error instanceof SignedOutError) {
     me = null;
+    teamInfo = null;
     renderLogin(error.message);
     return;
   }
@@ -485,21 +486,206 @@ function leadRow(lead) {
       </div>
       <p class="muted">${esc([lead.project, lead.source].filter(Boolean).join(" · "))}</p>
       <p class="muted">Assigned ${esc(shortDate(lead.assignedDate))} · ${days(lead.daysSinceAssigned)} ago ${flags}</p>
+      ${lead.ownerName ? `<p class="muted">RM: <b>${esc(lead.ownerName)}</b></p>` : ""}
       ${lead.nextAction ? `<p class="next">${esc(lead.nextAction)}</p>` : ""}
       ${contact ? `<div class="actions">${contact}</div>` : ""}
     </article>`;
 }
 
+// ---------------------------------------------------------------- team lists
+// A director works in the same screens as an RM and sees the team: "Mine" is the RM's own
+// list, "Team" is everything Salesforce shows them of their people's records.
+
+const SCOPES = [
+  { key: "mine", label: "Mine" },
+  { key: "team", label: "Team" }
+];
+let teamInfo = null;
+
+function hasTeamView() {
+  return Boolean(me && me.teamView);
+}
+
+function isTeamScope(params) {
+  return hasTeamView() && params.get("scope") === "team";
+}
+
+async function loadTeam() {
+  if (!teamInfo) {
+    teamInfo = await get("team/info");
+  }
+  return teamInfo;
+}
+
+function scopeChips(scope) {
+  return hasTeamView() ? chips(SCOPES, scope, "scope") : "";
+}
+
+function memberSelect(team, owner) {
+  return `
+    <select class="select" id="team-owner" aria-label="RM">
+      <option value="">Whole team</option>
+      ${team.members.map((m) => `<option value="${esc(m.id)}"${m.id === owner ? " selected" : ""}>${esc(m.name)}</option>`).join("")}
+    </select>`;
+}
+
+/** Wires the Mine / Team chips, the RM filter and the search box of a team list. */
+function wireTeamList(path, current) {
+  root
+    .querySelectorAll("[data-scope]")
+    .forEach((button) =>
+      button.addEventListener("click", () =>
+        go(path, button.dataset.scope === "team" ? { scope: "team" } : {})
+      )
+    );
+  if (!current) {
+    return;
+  }
+  const owner = document.getElementById("team-owner");
+  if (owner) {
+    owner.addEventListener("change", () =>
+      go(path, { ...current, owner: owner.value })
+    );
+  }
+  const search = document.getElementById("search");
+  if (search) {
+    search.addEventListener(
+      "change",
+      debounce(
+        (event) => go(path, { ...current, search: event.target.value.trim() }),
+        300
+      )
+    );
+  }
+}
+
+async function renderTeamLeads(token, params) {
+  const owner = params.get("owner") || "";
+  const status = params.get("status") || "";
+  const search = params.get("search") || "";
+  shell("Team Leads", loading(), "leads");
+  const team = await loadTeam();
+  if (token !== renderToken) {
+    return;
+  }
+  document.getElementById("screen").innerHTML = `
+    ${scopeChips("team")}
+    ${memberSelect(team, owner)}
+    <select class="select" id="team-status" aria-label="Lead status">
+      <option value="">All statuses</option>
+      ${team.leadStatuses.map((s) => `<option value="${esc(s)}"${s === status ? " selected" : ""}>${esc(s)}</option>`).join("")}
+    </select>
+    <input class="search" id="search" type="search" placeholder="Search name, phone or email" value="${esc(search)}" />
+    <div class="list" id="list"></div>`;
+  const current = { scope: "team", owner, status, search };
+  wireTeamList("leads", current);
+  document
+    .getElementById("team-status")
+    .addEventListener("change", (event) =>
+      go("leads", { ...current, status: event.target.value })
+    );
+  infiniteList(
+    document.getElementById("list"),
+    (offset) =>
+      get("team/leads", {
+        ownerId: owner,
+        status,
+        search,
+        pageSize: PAGE_SIZE,
+        offset
+      }),
+    leadRow,
+    "No leads here.",
+    token
+  );
+}
+
+const TEAM_DEAL_STEPS = [
+  { key: "active", label: "Active" },
+  { key: "new", label: "New" },
+  { key: "booked", label: "Booked" },
+  { key: "reserved", label: "Reserved" },
+  { key: "sold", label: "Sold" }
+];
+
+async function renderTeamDeals(token, params) {
+  const owner = params.get("owner") || "";
+  const step = params.get("step") || "active";
+  const search = params.get("search") || "";
+  shell("Team Deals", loading(), "deals");
+  const team = await loadTeam();
+  if (token !== renderToken) {
+    return;
+  }
+  document.getElementById("screen").innerHTML = `
+    ${scopeChips("team")}
+    ${chips(TEAM_DEAL_STEPS, step, "step")}
+    ${memberSelect(team, owner)}
+    <input class="search" id="search" type="search" placeholder="Search client or unit" value="${esc(search)}" />
+    <div class="list" id="list"></div>`;
+  const current = { scope: "team", owner, step, search };
+  wireTeamList("deals", current);
+  root
+    .querySelectorAll("[data-step]")
+    .forEach((button) =>
+      button.addEventListener("click", () =>
+        go("deals", { ...current, step: button.dataset.step })
+      )
+    );
+  openOnTap(document.getElementById("list"));
+  infiniteList(
+    document.getElementById("list"),
+    (offset) =>
+      get("team/deals", {
+        ownerId: owner,
+        step,
+        search,
+        pageSize: PAGE_SIZE,
+        offset
+      }),
+    dealRow,
+    "No deals here.",
+    token
+  );
+}
+
+async function renderTeamActivities(token, params) {
+  const owner = params.get("owner") || "";
+  shell("Team Activities", loading(), "home", { back: "#/home" });
+  const team = await loadTeam();
+  if (token !== renderToken) {
+    return;
+  }
+  document.getElementById("screen").innerHTML = `
+    ${scopeChips("team")}
+    ${memberSelect(team, owner)}
+    <div class="list" id="list"></div>`;
+  wireTeamList("activities", { scope: "team", owner });
+  openOnTap(document.getElementById("list"));
+  infiniteList(
+    document.getElementById("list"),
+    (offset) =>
+      get("team/activities", { ownerId: owner, pageSize: PAGE_SIZE, offset }),
+    activityRow,
+    "No activity recorded yet.",
+    token
+  );
+}
+
 function renderLeads(token, params) {
+  if (isTeamScope(params)) {
+    return renderTeamLeads(token, params);
+  }
   const bucket = params.get("bucket") || "open";
   const search = params.get("search") || "";
   shell(
     "My Leads",
-    `${chips(LEAD_BUCKETS, bucket, "bucket")}
+    `${scopeChips("mine")}${chips(LEAD_BUCKETS, bucket, "bucket")}
      <input class="search" id="search" type="search" placeholder="Search name, phone or email" value="${esc(search)}" />
      <div class="list" id="list"></div>`,
     "leads"
   );
+  wireTeamList("leads", null);
   root
     .querySelectorAll("[data-bucket]")
     .forEach((button) =>
@@ -553,20 +739,25 @@ function dealRow(deal) {
           ? ` <span class="pill pill-info">Shared with ${esc(deal.sharedWith)}</span>`
           : ""
       }</p>
+      ${deal.ownerName ? `<p class="muted">RM: <b>${esc(deal.ownerName)}</b></p>` : ""}
       ${deal.nextAction ? `<p class="next">${esc(deal.nextAction)}</p>` : ""}
     </article>`;
 }
 
 function renderDeals(token, params) {
+  if (isTeamScope(params)) {
+    return renderTeamDeals(token, params);
+  }
   const step = params.get("step") || "active";
   const search = params.get("search") || "";
   shell(
     "My Deals",
-    `${chips(DEAL_STEPS, step, "step")}
+    `${scopeChips("mine")}${chips(DEAL_STEPS, step, "step")}
      <input class="search" id="search" type="search" placeholder="Search client or unit" value="${esc(search)}" />
      <div class="list" id="list"></div>`,
     "deals"
   );
+  wireTeamList("deals", null);
   root
     .querySelectorAll("[data-step]")
     .forEach((button) =>
@@ -4051,17 +4242,22 @@ function activityRow(a) {
       <p class="muted">${esc(dateTime12(a.startDateTime))}${length}${
         a.outcome ? ` · ${esc(a.outcome)}` : ""
       }</p>
+      ${a.ownerName ? `<p class="muted">RM: <b>${esc(a.ownerName)}</b></p>` : ""}
     </article>`;
 }
 
-function renderActivities(token) {
+function renderActivities(token, params) {
+  if (isTeamScope(params)) {
+    return renderTeamActivities(token, params);
+  }
   shell(
     "My Activities",
-    `<a class="button-primary button-link" href="#/activity-new">Record Activity</a>
+    `${scopeChips("mine")}<a class="button-primary button-link" href="#/activity-new">Record Activity</a>
      <div class="list list-gap" id="list"></div>`,
     "home",
     { back: "#/home" }
   );
+  wireTeamList("activities", null);
   openOnTap(document.getElementById("list"));
   infiniteList(
     document.getElementById("list"),
@@ -4861,6 +5057,7 @@ function renderMe() {
   document.getElementById("sign-out").addEventListener("click", async () => {
     await signOut();
     me = null;
+    teamInfo = null;
     renderLogin();
   });
 }
@@ -4894,9 +5091,9 @@ async function render() {
     const { path, params } = routeNow();
     window.scrollTo(0, 0);
     if (path === "leads") {
-      renderLeads(token, params);
+      await renderLeads(token, params);
     } else if (path === "deals") {
-      renderDeals(token, params);
+      await renderDeals(token, params);
     } else if (path === "units") {
       await renderUnits(token, params);
     } else if (path === "deal") {
@@ -4928,7 +5125,7 @@ async function render() {
     } else if (path === "booking-new") {
       await renderBookingNew(token, params);
     } else if (path === "activities") {
-      renderActivities(token);
+      await renderActivities(token, params);
     } else if (path === "activity-new") {
       await renderActivityNew(token);
     } else if (path === "activity-edit") {
