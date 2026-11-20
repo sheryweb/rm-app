@@ -1654,3 +1654,30 @@ a.button-outline {
 .team-card {
   margin-bottom: 12px;
 }
+
+/* ---------- sales activity dashboard ---------- */
+
+.leader-block {
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 10px;
+}
+
+.leader-block .owner-row {
+  border-bottom: 0;
+  padding-bottom: 6px;
+}
+
+.leader-block .progress {
+  margin-bottom: 8px;
+}
+
+.progress-fill.is-met {
+  background: var(--ok);
+}
+
+.owner-row.is-idle > span b,
+.owner-row.is-idle > b {
+  color: var(--muted);
+  font-weight: 400;
+}

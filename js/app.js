@@ -406,6 +406,7 @@ async function renderHome(token) {
         ? `<div class="card form team-card">
              <h2 class="form-title">My Team</h2>
              <a class="button-outline button-link" href="#/sales-performance">Sales Performance</a>
+             <a class="button-outline button-link below" href="#/sales-activity">Sales Activity</a>
              <div class="two-links">
                <a href="#/deals?scope=team">Team Deals</a>
                <a href="#/leads?scope=team">Team Leads</a>
@@ -1104,6 +1105,357 @@ async function renderSalesPerformance(token, params) {
       title.scrollIntoView();
     }
   }
+}
+
+// ---------------------------------------------------- sales activity (directors)
+// The same dashboard as the "Sales Activity" tab in Salesforce, from the same service: client
+// meetings and agency briefings of the people the viewer can see, against the weekly target.
+// The arithmetic done here (weeks in a period, the leaderboard) is the Salesforce screen's.
+
+const ACT_TABS = [
+  { key: "meetings", label: "Client Meetings" },
+  { key: "briefings", label: "Agency Briefings" }
+];
+const ACT_MONTHS = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec"
+];
+
+function mondayOf(date) {
+  const day = new Date(date);
+  day.setHours(0, 0, 0, 0);
+  day.setDate(day.getDate() - ((day.getDay() + 6) % 7));
+  return day;
+}
+
+async function renderSalesActivity(token, params) {
+  const filters = {
+    tab: params.get("tab") === "briefings" ? "briefings" : "meetings",
+    month: params.get("month") || "",
+    week: params.get("week") || "",
+    rm: params.get("rm") || ""
+  };
+  shell("Sales Activity", loading(), "home", { back: "#/home" });
+  const data = await get("team/salesactivity", {
+    month: filters.month,
+    week: filters.week,
+    rm: filters.rm
+  });
+  if (token !== renderToken) {
+    return;
+  }
+  const reload = (changes) => {
+    const next = { ...filters, ...changes };
+    go("sales-activity", {
+      tab: next.tab,
+      month: next.month,
+      week: next.week,
+      rm: next.rm
+    });
+  };
+  const dayLabel = (date) => `${date.getDate()} ${ACT_MONTHS[date.getMonth()]}`;
+  const two = (n) => String(n).padStart(2, "0");
+
+  // ---- filter lists, built the way the Salesforce screen builds them
+  const now = new Date();
+  const months = [{ label: "All months", value: "" }];
+  const janFloor = `${now.getFullYear()}-01`;
+  const dataMonth = data.earliestMonth || janFloor;
+  let [y, m] = (dataMonth < janFloor ? dataMonth : janFloor)
+    .split("-")
+    .map(Number);
+  while (y <= now.getFullYear() && months.length <= 60) {
+    months.push({
+      label: `${ACT_MONTHS[m - 1]} ${y}`,
+      value: `${y}-${two(m)}`
+    });
+    m++;
+    if (m === 13) {
+      m = 1;
+      y++;
+    }
+  }
+  const weeks = [{ label: "All weeks", value: "" }];
+  if (filters.month) {
+    const [fy, fm] = filters.month.split("-").map(Number);
+    const monthEnd = new Date(fy, fm, 1);
+    for (
+      let monday = mondayOf(new Date(fy, fm - 1, 1));
+      monday < monthEnd;
+      monday = new Date(
+        monday.getFullYear(),
+        monday.getMonth(),
+        monday.getDate() + 7
+      )
+    ) {
+      weeks.push({
+        label: `Week of ${dayLabel(monday)}`,
+        value: isoDay(monday)
+      });
+    }
+  } else {
+    let monday = mondayOf(now);
+    for (let i = 0; i < 12; i++) {
+      weeks.push({
+        label:
+          i === 0
+            ? `This week (${dayLabel(monday)})`
+            : `Week of ${dayLabel(monday)}`,
+        value: isoDay(monday)
+      });
+      monday = new Date(
+        monday.getFullYear(),
+        monday.getMonth(),
+        monday.getDate() - 7
+      );
+    }
+  }
+  if (filters.week && !weeks.some((w) => w.value === filters.week)) {
+    const [wy, wm, wd] = filters.week.split("-").map(Number);
+    weeks.push({
+      label: `Week of ${dayLabel(new Date(wy, wm - 1, wd))}`,
+      value: filters.week
+    });
+  }
+  const options = (list, selected) =>
+    list
+      .map(
+        (o) =>
+          `<option value="${esc(o.value)}"${o.value === selected ? " selected" : ""}>${esc(o.label)}</option>`
+      )
+      .join("");
+
+  // ---- the period in words
+  let periodLabel = "";
+  if (filters.week) {
+    const [wy, wm, wd] = filters.week.split("-").map(Number);
+    periodLabel = `week of ${dayLabel(new Date(wy, wm - 1, wd))}`;
+  } else if (filters.month) {
+    const [fy, fm] = filters.month.split("-").map(Number);
+    periodLabel = `${ACT_MONTHS[fm - 1]} ${fy}`;
+  }
+  const filtered = Boolean(periodLabel);
+  let targetWeeks = 1;
+  if (!filters.week && filters.month) {
+    const [fy, fm] = filters.month.split("-").map(Number);
+    targetWeeks = Math.max(1, Math.round(new Date(fy, fm, 0).getDate() / 7));
+  }
+
+  const board =
+    (filters.tab === "briefings"
+      ? data.agencyBriefings
+      : data.clientMeetings) || {};
+  const noun =
+    filters.tab === "briefings" ? "agency briefing" : "client meeting";
+  const k = board.kpis || {};
+  const tile = (label, value, warn) => `
+    <div class="tile${warn ? " tone-urgent" : ""}">
+      <span class="tile-count">${esc(String(value))}</span>
+      <span class="tile-label">${esc(label)}</span>
+    </div>`;
+  const kpis = filtered
+    ? [
+        tile(`Events · ${periodLabel}`, k.monthCount),
+        tile("Hours in the field", k.monthHours),
+        tile("Active RMs", k.activeRms),
+        tile("Agencies covered", `${k.agenciesCovered} / ${k.agenciesTotal}`),
+        tile(
+          "Agencies not covered",
+          k.agenciesAttention,
+          k.agenciesAttention > 0
+        )
+      ]
+    : [
+        tile("This week", k.weekCount),
+        tile("This month", k.monthCount),
+        tile("Hours in the field (month)", k.monthHours),
+        tile("Active RMs this month", k.activeRms),
+        tile(
+          "Agencies covered (90 days)",
+          `${k.agenciesCovered} / ${k.agenciesTotal}`
+        ),
+        tile(
+          "Agencies needing attention",
+          k.agenciesAttention,
+          k.agenciesAttention > 0
+        )
+      ];
+
+  // ---- target leaderboard
+  const inTarget = (data.inboundTarget || 1) * targetWeeks;
+  const outTarget = (data.outboundTarget || 1) * targetWeeks;
+  const leaders = (board.rmRows || [])
+    .map((r) => {
+      const inShare = Math.min(r.weekInbound / inTarget, 1);
+      const outShare = Math.min(r.weekOutbound / outTarget, 1);
+      return {
+        row: r,
+        inShare,
+        outShare,
+        attainment: (inShare + outShare) / 2,
+        met: r.weekInbound >= inTarget && r.weekOutbound >= outTarget
+      };
+    })
+    .sort(
+      (a, b) =>
+        b.attainment - a.attainment || a.row.name.localeCompare(b.row.name)
+    );
+  const targetBase = `the weekly target of ${data.inboundTarget} inbound + ${data.outboundTarget} outbound (online counts as inbound)`;
+  const targetNote = !filtered
+    ? `Counting ${noun}s only, against ${targetBase}.`
+    : `Counting ${noun}s in the ${periodLabel}, against ${targetBase}${targetWeeks > 1 ? ` × ${targetWeeks} weeks` : ""}.`;
+  const miniBar = (label, done, target, share) => `
+    <div class="progress">
+      <div class="progress-head"><span>${label}</span><b>${done} / ${target}</b></div>
+      <div class="progress-track"><div class="progress-fill${done >= target ? " is-met" : ""}" style="width:${Math.round(share * 100)}%"></div></div>
+    </div>`;
+
+  const attention = board.needsAttention || [];
+  const attentionNote =
+    attention.length < (k.agenciesAttention || 0)
+      ? `Showing the ${attention.length} most urgent of ${k.agenciesAttention} agencies.`
+      : filtered
+        ? `${k.agenciesAttention} agencies with no ${noun} in the ${periodLabel} (last activity is all-time).`
+        : `${k.agenciesAttention} agencies with no ${noun} in the last 60 days.`;
+  const countList = (rows, empty) =>
+    barList(
+      (rows || []).map((row) => ({
+        label: row.name || "Not set",
+        value: row.count || 0,
+        amount: String(row.count)
+      })),
+      empty
+    );
+
+  document.getElementById("screen").innerHTML = `
+    ${chips(ACT_TABS, filters.tab, "tab")}
+    <div class="card form">
+      <label class="form-field"><span>Month</span><select class="select" id="act-month">${options(months, filters.month)}</select></label>
+      <label class="form-field"><span>Week</span><select class="select" id="act-week">${options(weeks, filters.week)}</select></label>
+      <label class="form-field"><span>Relationship Manager</span>
+        <select class="select" id="act-rm">
+          <option value="">All RMs</option>
+          ${options(data.rmOptions || [], filters.rm)}
+        </select>
+      </label>
+      <button type="button" class="button-outline" id="act-reset">Clear Filters</button>
+    </div>
+
+    <div class="tiles">
+      ${tile(`${filtered ? "" : "Total "}Client Meetings${filtered ? " · " + periodLabel : ""}`, data.totalClientMeetings)}
+      ${tile(`${filtered ? "" : "Total "}Agency Briefings${filtered ? " · " + periodLabel : ""}`, data.totalAgencyBriefings)}
+    </div>
+    <p class="hint">A meeting or briefing attended by several RMs counts once in these numbers.</p>
+    <div class="tiles">${kpis.join("")}</div>
+
+    <div class="card form">
+      <h2 class="form-title">${filtered ? `Target Leaderboard · ${esc(periodLabel)}` : "Weekly Target Leaderboard"}</h2>
+      <p class="muted">${esc(targetNote)}</p>
+      ${
+        leaders.length
+          ? leaders
+              .map(
+                (l, i) => `
+        <div class="leader-block">
+          <div class="owner-row">
+            <span class="rank">${i + 1}</span>
+            <span><b>${esc(l.row.name)}</b></span>
+            <span class="pill ${l.met ? "pill-ok" : "pill-muted"}">${l.met ? "Target met" : Math.round(l.attainment * 100) + "%"}</span>
+          </div>
+          ${miniBar("Inbound", l.row.weekInbound, inTarget, l.inShare)}
+          ${miniBar("Outbound", l.row.weekOutbound, outTarget, l.outShare)}
+        </div>`
+              )
+              .join("")
+          : `<p class="muted">${filtered ? "No activities in the selected period." : "No activities logged this week yet."}</p>`
+      }
+    </div>
+
+    <div class="card form">
+      <h2 class="form-title">${filtered ? `RM Activity · ${esc(periodLabel)}` : "RM Activity This Month"}</h2>
+      <p class="muted">${filtered ? "Each RM's own records in the selected period." : "Greyed rows have logged nothing this week."}</p>
+      ${
+        (board.rmRows || []).length
+          ? board.rmRows
+              .map(
+                (r) => `
+        <div class="owner-row${!filtered && !r.weekCount ? " is-idle" : ""}">
+          <span><b>${esc(r.name)}</b><br /><small>${
+            filtered
+              ? `${r.weekInbound} inbound · ${r.weekOutbound} outbound · ${r.hours} h`
+              : `${r.weekCount} this week · ${r.hours} h this month`
+          }${r.lastLogged ? ` · last ${esc(r.lastLogged)}` : ""}</small></span>
+          <b>${r.monthCount}</b>
+        </div>`
+              )
+              .join("")
+          : `<p class="muted">${filtered ? "No activities in the selected period." : "No activities logged this month yet."}</p>`
+      }
+    </div>
+
+    <div class="card form">
+      <h2 class="form-title">${filtered ? "Agencies Not Covered in the Period" : "Agencies Needing Attention"}</h2>
+      ${
+        attention.length
+          ? `<p class="muted">${esc(attentionNote)}</p>
+             ${attention
+               .map(
+                 (a) => `
+               <div class="owner-row">
+                 <span><b>${esc(a.name)}</b><br /><small>${a.lastActivity ? `Last ${esc(a.lastActivity)} · ${a.daysSince} days ago` : "Never visited"} · ${a.count90} ${filtered ? "in period" : "in 90 days"}</small></span>
+                 ${a.lastActivity ? "" : `<span class="pill pill-urgent">Never</span>`}
+               </div>`
+               )
+               .join("")}`
+          : `<p class="muted">${filtered ? `Every agency had a ${noun} in the ${esc(periodLabel)}.` : `Every agency has had a ${noun} in the last 60 days.`}</p>`
+      }
+    </div>
+
+    <div class="card form">
+      <h2 class="form-title">Outcomes</h2>
+      ${countList(board.outcomes, "No outcomes recorded in this period.")}
+    </div>
+
+    <div class="card form">
+      <h2 class="form-title">Projects Not in the List</h2>
+      <p class="muted">Projects typed under "Other" when recording an activity.</p>
+      ${countList(board.otherProjects, "None mentioned in this period.")}
+    </div>`;
+
+  root
+    .querySelectorAll("[data-tab]")
+    .forEach((button) =>
+      button.addEventListener("click", () =>
+        reload({ tab: button.dataset.tab })
+      )
+    );
+  // the week list belongs to the month, so a new month clears the week
+  document
+    .getElementById("act-month")
+    .addEventListener("change", (e) =>
+      reload({ month: e.target.value, week: "" })
+    );
+  document
+    .getElementById("act-week")
+    .addEventListener("change", (e) => reload({ week: e.target.value }));
+  document
+    .getElementById("act-rm")
+    .addEventListener("change", (e) => reload({ rm: e.target.value }));
+  document
+    .getElementById("act-reset")
+    .addEventListener("click", () =>
+      go("sales-activity", { tab: filters.tab })
+    );
 }
 
 function renderLeads(token, params) {
@@ -5548,6 +5900,8 @@ async function render() {
       await renderApproval(token, params);
     } else if (path === "request-price") {
       await renderRequestPrice(token, params);
+    } else if (path === "sales-activity") {
+      await renderSalesActivity(token, params);
     } else if (path === "sales-performance") {
       await renderSalesPerformance(token, params);
     } else if (path === "request-plan") {
