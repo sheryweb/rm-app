@@ -401,6 +401,19 @@ async function renderHome(token) {
         ? `<a class="alert-row approvals-alert" href="#/approvals"><b>${waiting.length} request${waiting.length === 1 ? "" : "s"} waiting for your approval</b><span>›</span></a>`
         : ""
     }
+    ${
+      hasTeamView()
+        ? `<div class="card form team-card">
+             <h2 class="form-title">My Team</h2>
+             <a class="button-outline button-link" href="#/sales-performance">Sales Performance</a>
+             <div class="two-links">
+               <a href="#/deals?scope=team">Team Deals</a>
+               <a href="#/leads?scope=team">Team Leads</a>
+               <a href="#/activities?scope=team">Team Activities</a>
+             </div>
+           </div>`
+        : ""
+    }
     <div class="quick-actions">
       <a class="button-primary button-link" href="#/activity-new">Record Activity</a>
       <a class="button-outline button-link" href="#/client-new">Add Client</a>
@@ -670,6 +683,427 @@ async function renderTeamActivities(token, params) {
     "No activity recorded yet.",
     token
   );
+}
+
+// ------------------------------------------------- sales performance (directors)
+// The same dashboard as the "Sales Performance" tab in Salesforce, from the same service:
+// Booked / Reserved / Sold of the director's team for a period, the trend, the projects, the
+// RM leaderboard, the cancellations and the deals behind the numbers.
+
+const PERF_PERIODS = ["Yearly", "Monthly", "Daily", "Date Range"];
+const PERF_MONTHS = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December"
+];
+const PERF_PRESETS = [
+  { key: "last7", label: "Last 7 days" },
+  { key: "last30", label: "Last 30 days" },
+  { key: "mtd", label: "MTD" },
+  { key: "qtd", label: "QTD" },
+  { key: "ytd", label: "YTD" }
+];
+
+function presetRange(key) {
+  const end = new Date();
+  let start = new Date(end);
+  if (key === "last7") {
+    start.setDate(end.getDate() - 6);
+  } else if (key === "last30") {
+    start.setDate(end.getDate() - 29);
+  } else if (key === "mtd") {
+    start = new Date(end.getFullYear(), end.getMonth(), 1);
+  } else if (key === "qtd") {
+    start = new Date(end.getFullYear(), Math.floor(end.getMonth() / 3) * 3, 1);
+  } else {
+    start = new Date(end.getFullYear(), 0, 1);
+  }
+  return { from: isoDay(start), to: isoDay(end) };
+}
+
+/** A list of horizontal bars; a bar with a `drill` can be tapped. */
+function barList(items, emptyMessage) {
+  const visible = items.filter((item) => item.value > 0 || item.always);
+  if (!visible.length) {
+    return `<p class="muted">${esc(emptyMessage)}</p>`;
+  }
+  const top = Math.max(...visible.map((item) => item.value), 1);
+  return visible
+    .map((item) => {
+      const inner = `
+        <div class="progress-head"><span>${esc(item.label)}</span><b>${esc(item.amount)}</b></div>
+        <div class="progress-track"><div class="progress-fill" style="width:${item.value > 0 ? Math.max(2, Math.round((item.value / top) * 100)) : 0}%"></div></div>
+        ${item.note ? `<small>${esc(item.note)}</small>` : ""}`;
+      return item.drill
+        ? `<button type="button" class="progress bar-button${item.selected ? " is-selected" : ""}" data-drill="${esc(JSON.stringify(item.drill))}">${inner}</button>`
+        : `<div class="progress${item.selected ? " is-selected" : ""}">${inner}</div>`;
+    })
+    .join("");
+}
+
+function perfDealRow(deal) {
+  const cancelled = deal.cancelledDate != null;
+  return `
+    <article class="row is-link" data-open="#/deal?id=${esc(deal.opportunityId)}">
+      <div class="row-head">
+        <h4>${esc([deal.projectName, deal.propertyCode].filter(Boolean).join(" · ") || deal.name)}</h4>
+        <span class="pill">${esc(money(deal.amount, "AED"))}</span>
+      </div>
+      <p class="muted">${esc(deal.name || "")}</p>
+      <p class="muted">${esc(["RM: " + (deal.rmName || "—"), deal.agencyName].filter(Boolean).join(" · "))}</p>
+      <p class="muted">Booked ${esc(shortDate(deal.bookedDate))}${
+        cancelled
+          ? ` · Cancelled ${esc(shortDate(deal.cancelledDate))}${deal.daysHeld == null ? "" : ` · held ${days(deal.daysHeld)}`}${deal.stageReached ? ` · reached ${esc(deal.stageReached)}` : ""}`
+          : ""
+      }</p>
+    </article>`;
+}
+
+async function renderSalesPerformance(token, params) {
+  const filters = {
+    period: PERF_PERIODS.includes(params.get("period"))
+      ? params.get("period")
+      : "Yearly",
+    year: params.get("year") || "",
+    month: params.get("month") || "",
+    date: params.get("date") || "",
+    from: params.get("from") || "",
+    to: params.get("to") || "",
+    rm: params.get("rm") || "",
+    resells: params.get("resells") === "1",
+    stage: params.get("stage") || "Booked"
+  };
+  shell("Sales Performance", loading(), "home", { back: "#/home" });
+  const data = await get("team/salesperformance", {
+    periodType: filters.period,
+    targetYear: filters.year,
+    targetMonth: filters.month,
+    targetDate: filters.date,
+    startDate: filters.from,
+    endDate: filters.to,
+    rmId: filters.rm,
+    excludeResells: filters.resells ? "true" : "false"
+  });
+  if (token !== renderToken) {
+    return;
+  }
+  // what the service settled on (defaults filled in)
+  filters.year = data.selectedYear || filters.year;
+  filters.month = data.selectedMonth || filters.month;
+  filters.date = data.selectedDate || filters.date;
+  filters.from = data.selectedRangeStart || filters.from;
+  filters.to = data.selectedRangeEnd || filters.to;
+  const reload = (changes) => {
+    const next = { ...filters, ...changes };
+    go("sales-performance", {
+      period: next.period,
+      year: next.year,
+      month: next.month,
+      date: next.date,
+      from: next.from,
+      to: next.to,
+      rm: next.rm,
+      resells: next.resells ? "1" : "",
+      stage: next.stage
+    });
+  };
+  const aed = (value) => money(value || 0, "AED");
+  const short = (value) => "AED " + compactNumber.format(value || 0);
+  const options = (list, selected) =>
+    list
+      .map(
+        (o) =>
+          `<option value="${esc(o.value)}"${String(o.value) === String(selected) ? " selected" : ""}>${esc(o.label)}</option>`
+      )
+      .join("");
+
+  // ---- the period pickers
+  const yearSelect = `<label class="form-field"><span>Year</span><select class="select" id="perf-year">${options(data.yearOptions || [], filters.year)}</select></label>`;
+  const pickers =
+    filters.period === "Yearly"
+      ? yearSelect
+      : filters.period === "Monthly"
+        ? `${yearSelect}<label class="form-field"><span>Month</span><select class="select" id="perf-month">${options(
+            PERF_MONTHS.map((label, i) => ({ label, value: String(i + 1) })),
+            filters.month
+          )}</select></label>`
+        : filters.period === "Daily"
+          ? `<label class="form-field"><span>Date</span><input class="search" type="date" id="perf-date" value="${esc(filters.date)}" /></label>`
+          : `<div class="two-fields">
+               <label class="form-field"><span>From</span><input class="search" type="date" id="perf-from" value="${esc(filters.from)}" /></label>
+               <label class="form-field"><span>To</span><input class="search" type="date" id="perf-to" value="${esc(filters.to)}" /></label>
+             </div>
+             ${chips(PERF_PRESETS, "", "preset")}`;
+
+  // ---- the trend: months of the year, or days of the month / range
+  const rangeDays =
+    filters.period === "Date Range" && filters.from && filters.to
+      ? Math.round((new Date(filters.to) - new Date(filters.from)) / 86400000) +
+        1
+      : 0;
+  const byMonth =
+    filters.period === "Yearly" ||
+    (filters.period === "Date Range" && rangeDays > 62);
+  const trendItems = (
+    byMonth ? data.monthlySeries : data.dailySeries || []
+  ).map((point) => {
+    const key = String(point.key || "");
+    let drill = null;
+    if (byMonth) {
+      const parts = key.includes("-") ? key.split("-") : [filters.year, key];
+      drill = {
+        period: "Monthly",
+        year: parts[0],
+        month: String(Number(parts[1]))
+      };
+    } else if (/^\d{4}-\d{2}-\d{2}$/.test(key)) {
+      drill = { period: "Daily", date: key };
+    }
+    return {
+      label: byMonth ? point.label : shortDate(key) || point.label,
+      value: point.amount || 0,
+      amount: short(point.amount),
+      note: `${point.dealCount} deal${point.dealCount === 1 ? "" : "s"}`,
+      drill,
+      selected: filters.period === "Daily" && key === filters.date,
+      always: byMonth && filters.period === "Yearly"
+    };
+  });
+
+  const cancel = data.cancellations || {};
+  const stageTabs = [
+    ...(data.stageSections || []).map((s) => ({
+      key: s.stage,
+      label: s.stage,
+      count: s.dealCount
+    })),
+    { key: "Cancelled", label: "Cancelled", count: cancel.dealCount || 0 }
+  ];
+  const section =
+    filters.stage === "Cancelled"
+      ? cancel
+      : (data.stageSections || []).find((s) => s.stage === filters.stage) ||
+        (data.stageSections || [])[0] ||
+        {};
+  const sectionRows = section.rows || [];
+
+  document.getElementById("screen").innerHTML = `
+    <div class="card form">
+      <label class="form-field"><span>Period</span>
+        <select class="select" id="perf-period">${options(
+          PERF_PERIODS.map((label) => ({ label, value: label })),
+          filters.period
+        )}</select>
+      </label>
+      ${pickers}
+      <label class="form-field"><span>Relationship Manager</span>
+        <select class="select" id="perf-rm">
+          <option value="">${data.viewAll ? "All RMs" : "Whole team"}</option>
+          ${options(data.rmOptions || [], filters.rm)}
+        </select>
+      </label>
+      <label class="check-line"><input type="checkbox" id="perf-resells" ${filters.resells ? "checked" : ""} /> <span>Exclude resells</span></label>
+      <button type="button" class="button-outline" id="perf-reset">Reset Filters</button>
+    </div>
+
+    <p class="hint">${esc(data.periodLabel || "")} · ${
+      data.viewAll
+        ? "all RMs"
+        : `your team (${data.teamSize} ${data.teamSize === 1 ? "person" : "people"})`
+    } · by booking date · AED</p>
+
+    <div class="tiles">
+      ${(data.stageSections || [])
+        .map(
+          (s) => `
+        <button type="button" class="tile tile-button" data-stage="${esc(s.stage)}">
+          <span class="tile-label">${esc(s.stage)}</span>
+          <span class="tile-count">${s.dealCount}</span>
+          <span class="tile-label">${esc(short(s.totalValue))}</span>
+        </button>`
+        )
+        .join("")}
+      <div class="tile tone-total">
+        <span class="tile-label">Total Sales</span>
+        <span class="tile-count">${data.totalDeals}</span>
+        <span class="tile-label">${esc(short(data.totalValue))}</span>
+      </div>
+    </div>
+    <div class="card">
+      ${field("Total value", aed(data.totalValue))}
+      ${field("Average deal", aed(data.averageDealValue))}
+    </div>
+
+    <div class="card form">
+      <h2 class="form-title">Sales Trend</h2>
+      <p class="muted">${byMonth ? "By month" : "By day"}. Tap a bar to look inside it.</p>
+      ${barList(trendItems, "No sales in this period.")}
+    </div>
+
+    <div class="card form">
+      <h2 class="form-title">Sales by Project</h2>
+      ${barList(
+        (data.projectBreakdown || []).map((project) => ({
+          label: project.projectName || "No project",
+          value: project.totalValue || 0,
+          amount: short(project.totalValue),
+          note: `${project.dealCount} deal${project.dealCount === 1 ? "" : "s"} · ${project.sharePercent}% of sales`
+        })),
+        "No sales in this period."
+      )}
+    </div>
+
+    <div class="card form">
+      <h2 class="form-title">RM Leaderboard</h2>
+      ${
+        (data.leaderboard || []).length
+          ? data.leaderboard
+              .map(
+                (row) => `
+        <button type="button" class="owner-row leader-row" data-rm="${esc(row.rmId)}">
+          <span class="rank">${row.rank}</span>
+          <span><b>${esc(row.rmName)}</b><br /><small>${row.dealCount} deal${row.dealCount === 1 ? "" : "s"} · average ${esc(short(row.averageValue))} · ${row.sharePercent}%</small></span>
+          <b>${esc(short(row.totalValue))}</b>
+        </button>`
+              )
+              .join("")
+          : `<p class="muted">No sales in this period.</p>`
+      }
+    </div>
+
+    <div class="card form">
+      <h2 class="form-title">Cancellations</h2>
+      <p class="muted">Deals cancelled in this period, by cancellation date.</p>
+      <div class="stats">
+        <div><b>${cancel.dealCount || 0}</b><span>Deals</span></div>
+        <div><b>${esc(compactNumber.format(cancel.totalValue || 0))}</b><span>AED</span></div>
+        <div><b>${cancel.averageDays || 0}</b><span>Avg days held</span></div>
+      </div>
+      ${field("Median days held", cancel.dealCount ? String(cancel.medianDays) : "")}
+      ${field("Longest held", cancel.dealCount ? days(cancel.longestDays) : "")}
+      ${cancel.undatedCount ? `<p class="muted">${cancel.undatedCount} cancelled deal${cancel.undatedCount === 1 ? " has" : "s have"} no cancellation date and ${cancel.undatedCount === 1 ? "is" : "are"} not counted.</p>` : ""}
+      ${
+        cancel.dealCount
+          ? `<h3 class="sub-title">Days Held Before Cancellation</h3>
+             ${barList(
+               (cancel.buckets || []).map((bucket) => ({
+                 label: bucket.label,
+                 value: bucket.dealCount || 0,
+                 amount: String(bucket.dealCount),
+                 note: short(bucket.totalValue),
+                 always: true
+               })),
+               ""
+             )}
+             <h3 class="sub-title">By RM</h3>
+             ${(cancel.byRm || [])
+               .map(
+                 (row) => `
+               <div class="owner-row">
+                 <span><b>${esc(row.rmName)}</b><br /><small>${row.dealCount} deal${row.dealCount === 1 ? "" : "s"} · average ${row.averageDays} days held</small></span>
+                 <b>${esc(short(row.totalValue))}</b>
+               </div>`
+               )
+               .join("")}`
+          : ""
+      }
+    </div>
+
+    <h2 class="list-title">Deal Breakdown</h2>
+    ${chips(stageTabs, filters.stage === "Cancelled" ? "Cancelled" : section.stage, "tab")}
+    ${section.rowsCapped ? `<p class="hint">Only the first ${sectionRows.length} deals are listed.</p>` : ""}
+    <div class="list" id="list"></div>`;
+
+  const on = (id, event, handler) => {
+    const el = document.getElementById(id);
+    if (el) {
+      el.addEventListener(event, handler);
+    }
+  };
+  on("perf-period", "change", (e) => reload({ period: e.target.value }));
+  on("perf-year", "change", (e) => reload({ year: e.target.value }));
+  on("perf-month", "change", (e) => reload({ month: e.target.value }));
+  on(
+    "perf-date",
+    "change",
+    (e) => e.target.value && reload({ date: e.target.value })
+  );
+  on(
+    "perf-from",
+    "change",
+    (e) => e.target.value && reload({ from: e.target.value })
+  );
+  on(
+    "perf-to",
+    "change",
+    (e) => e.target.value && reload({ to: e.target.value })
+  );
+  on("perf-rm", "change", (e) => reload({ rm: e.target.value }));
+  on("perf-resells", "change", (e) => reload({ resells: e.target.checked }));
+  on("perf-reset", "click", () => go("sales-performance", {}));
+  root
+    .querySelectorAll("[data-preset]")
+    .forEach((button) =>
+      button.addEventListener("click", () =>
+        reload({ period: "Date Range", ...presetRange(button.dataset.preset) })
+      )
+    );
+  root
+    .querySelectorAll("[data-drill]")
+    .forEach((button) =>
+      button.addEventListener("click", () =>
+        reload(JSON.parse(button.dataset.drill))
+      )
+    );
+  root
+    .querySelectorAll("[data-rm]")
+    .forEach((button) =>
+      button.addEventListener("click", () => reload({ rm: button.dataset.rm }))
+    );
+  const showStage = (stage) => {
+    // the stage only changes the list at the bottom: stay where the list is
+    sessionStorage.setItem("perf-to-list", "1");
+    reload({ stage });
+  };
+  root
+    .querySelectorAll("[data-stage]")
+    .forEach((button) =>
+      button.addEventListener("click", () => showStage(button.dataset.stage))
+    );
+  root
+    .querySelectorAll("[data-tab]")
+    .forEach((button) =>
+      button.addEventListener("click", () => showStage(button.dataset.tab))
+    );
+  const list = document.getElementById("list");
+  openOnTap(list);
+  infiniteList(
+    list,
+    (offset) =>
+      Promise.resolve({
+        rows: sectionRows.slice(offset, offset + PAGE_SIZE),
+        hasMore: offset + PAGE_SIZE < sectionRows.length
+      }),
+    perfDealRow,
+    "No deals here.",
+    token
+  );
+  if (sessionStorage.getItem("perf-to-list")) {
+    sessionStorage.removeItem("perf-to-list");
+    const title = root.querySelector(".list-title");
+    if (title) {
+      title.scrollIntoView();
+    }
+  }
 }
 
 function renderLeads(token, params) {
@@ -5114,6 +5548,8 @@ async function render() {
       await renderApproval(token, params);
     } else if (path === "request-price") {
       await renderRequestPrice(token, params);
+    } else if (path === "sales-performance") {
+      await renderSalesPerformance(token, params);
     } else if (path === "request-plan") {
       await renderRequestPlan(token, params);
     } else if (path === "request-share") {

@@ -1557,3 +1557,100 @@ a.button-outline {
   width: 20px;
   height: 20px;
 }
+
+/* ---------- sales performance dashboard ---------- */
+
+.two-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.two-fields .search {
+  min-width: 0;
+}
+
+.tile-button {
+  border-top: 0;
+  border-right: 0;
+  border-bottom: 0;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+}
+
+.tone-total {
+  border-left-color: var(--gold);
+}
+
+.bar-button {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+}
+
+.progress small {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.progress.is-selected .progress-fill {
+  background: var(--text);
+}
+
+.sub-title {
+  margin: 16px 0 10px;
+  font-size: 14px;
+}
+
+.list-title {
+  margin: 18px 4px 10px;
+  font-size: 17px;
+}
+
+.leader-row {
+  width: 100%;
+  border-top: 0;
+  border-left: 0;
+  border-right: 0;
+  background: transparent;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+}
+
+.leader-row > b {
+  flex: none;
+  white-space: nowrap;
+}
+
+.rank {
+  flex: none !important;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--line);
+  text-align: center;
+  line-height: 28px;
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.two-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin-top: 12px;
+  font-size: 14px;
+}
+
+.team-card {
+  margin-bottom: 12px;
+}
