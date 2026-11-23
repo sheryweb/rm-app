@@ -23,6 +23,8 @@ let renderToken = 0;
 let scrollWatcher = null;
 /** The screen shown before Send Feedback was opened: sent along with the feedback. */
 let lastScreen = "";
+/** How many requests wait for this user's decision: the badge on the profile button. */
+let waitingCount = 0;
 
 // ------------------------------------------------------------------ helpers
 
@@ -105,6 +107,48 @@ function debounce(fn, wait) {
   };
 }
 
+// -------------------------------------------------------------------- badge
+
+function badge(count) {
+  return count > 0
+    ? `<span class="badge">${count > 99 ? "99+" : count}</span>`
+    : "";
+}
+
+/** Shows the count on the profile button and, where the phone allows it, on the app icon. */
+function setWaiting(count) {
+  waitingCount = count || 0;
+  const button = document.querySelector(".avatar-button");
+  if (button) {
+    const old = button.querySelector(".badge");
+    if (old) {
+      old.remove();
+    }
+    button.insertAdjacentHTML("beforeend", badge(waitingCount));
+  }
+  try {
+    if (waitingCount > 0 && navigator.setAppBadge) {
+      navigator.setAppBadge(waitingCount).catch(() => {});
+    } else if (!waitingCount && navigator.clearAppBadge) {
+      navigator.clearAppBadge().catch(() => {});
+    }
+  } catch (e) {
+    // the phone has no icon badge: the one inside the app is enough
+  }
+}
+
+/** Asks Salesforce again; a failure leaves the last known count in place. */
+async function refreshWaiting() {
+  if (!me || !isSignedIn() || document.visibilityState !== "visible") {
+    return;
+  }
+  try {
+    setWaiting((await get("approvals")).length);
+  } catch (e) {
+    // offline or signed out: the next screen will say so
+  }
+}
+
 // -------------------------------------------------------------------- shell
 
 const TABS = [
@@ -147,7 +191,7 @@ function shell(title, body, activePath, options) {
        </a>`
     : `<a class="icon-button avatar-button" href="#/me" aria-label="My profile">${esc(
         ((me && me.name) || "?").slice(0, 1)
-      )}</a>`;
+      )}${badge(waitingCount)}</a>`;
   root.innerHTML = `
     <header class="topbar">
       ${lead}
@@ -269,6 +313,7 @@ function handleError(error, target) {
   if (error instanceof SignedOutError) {
     me = null;
     teamInfo = null;
+    setWaiting(0);
     renderLogin(error.message);
     return;
   }
@@ -309,13 +354,28 @@ const TONE_CLASS = {
 async function renderHome(token) {
   shell("My Dashboard", loading(), "home");
   // the approvals count must never stop the dashboard from showing
-  const [data, waiting] = await Promise.all([
+  // nor may the user's own requests
+  const [data, waiting, mine] = await Promise.all([
     get("dashboard"),
-    get("approvals").catch(() => [])
+    get("approvals").catch(() => null),
+    get("requests/mine").catch(() => [])
   ]);
   if (token !== renderToken) {
     return;
   }
+  if (waiting) {
+    setWaiting(waiting.length);
+  }
+  const waitingNow = waiting ? waiting.length : waitingCount;
+  // on the home screen: what is still open, and what was decided in the last 7 days
+  const weekAgo = new Date(Date.now() - 7 * 86400000)
+    .toISOString()
+    .slice(0, 10);
+  const openMine = mine.filter((r) => r.open);
+  const decidedMine = mine.filter(
+    (r) => !r.open && r.decided && r.decided >= weekAgo
+  );
+  const myRequests = [...openMine.slice(0, 3), ...decidedMine.slice(0, 3)];
   const leads = data.leads || {};
   const deals = data.deals || {};
   const activity = data.activity || {};
@@ -402,8 +462,8 @@ async function renderHome(token) {
     </section>
 
     ${
-      waiting.length
-        ? `<a class="alert-row approvals-alert" href="#/approvals"><b>${waiting.length} request${waiting.length === 1 ? "" : "s"} waiting for your approval</b><span>›</span></a>`
+      waitingNow
+        ? `<a class="alert-row approvals-alert" href="#/approvals"><b>${waitingNow} request${waitingNow === 1 ? "" : "s"} waiting for your approval</b><span>›</span></a>`
         : ""
     }
     ${
@@ -427,6 +487,16 @@ async function renderHome(token) {
 
     <h3 class="section-title">My Day</h3>
     <div class="tiles">${tiles || emptyBox("Nothing needs attention.")}</div>
+
+    ${
+      myRequests.length
+        ? `<h3 class="section-title">My Requests</h3>
+           <div class="list" id="my-requests">${myRequests.map(myRequestRow).join("")}</div>
+           <a class="button-outline button-link below" href="#/my-requests">All My Requests${
+             openMine.length ? " (" + openMine.length + " open)" : ""
+           }</a>`
+        : ""
+    }
 
     <h3 class="section-title">My Leads</h3>
     <div class="card two-up">
@@ -465,6 +535,10 @@ async function renderHome(token) {
       </div>
       <div class="chart">${chart}</div>
     </div>`;
+  const requestList = document.getElementById("my-requests");
+  if (requestList) {
+    openOnTap(requestList);
+  }
 }
 
 // -------------------------------------------------------------------- leads
@@ -2299,12 +2373,64 @@ function approvalRow(r) {
     </article>`;
 }
 
+/** One request the user raised: what, where it stands, and who has it now. */
+function myRequestRow(r) {
+  const where = r.open
+    ? r.waitingFor
+      ? "Waiting for " + r.waitingFor
+      : "Waiting for a decision"
+    : r.decided
+      ? "Decided " + shortDate(r.decided)
+      : "";
+  return `
+    <article class="row is-link" data-open="#/approval?id=${esc(r.id)}&from=mine">
+      <div class="row-head">
+        <h4>${esc(r.requestType)}</h4>
+        <span class="pill ${REQUEST_STATUS_PILL[r.status] || ""}">${esc(r.open ? "Waiting" : r.status)}</span>
+      </div>
+      <p class="muted">${esc([r.subject, r.name].filter(Boolean).join(" · "))}</p>
+      ${r.change ? `<p class="muted">${esc(r.change)}</p>` : ""}
+      <p class="muted">${where ? `<b>${esc(where)}</b> · ` : ""}Sent ${esc(dateTime12(r.submitted))}</p>
+    </article>`;
+}
+
+/** Every request the user raised (the latest 50), open ones first. */
+async function renderMyRequests(token) {
+  shell("My Requests", loading(), "home", { back: "#/home" });
+  const rows = await get("requests/mine");
+  if (token !== renderToken) {
+    return;
+  }
+  const open = rows.filter((r) => r.open);
+  const decided = rows.filter((r) => !r.open);
+  const screen = document.getElementById("screen");
+  screen.innerHTML = rows.length
+    ? `${
+        open.length
+          ? `<h3 class="section-title">Open</h3>
+             <div class="list">${open.map(myRequestRow).join("")}</div>`
+          : emptyBox("None of your requests is waiting for a decision.")
+      }
+      ${
+        decided.length
+          ? `<h3 class="section-title">Decided</h3>
+             <div class="list">${decided.map(myRequestRow).join("")}</div>`
+          : ""
+      }
+      <p class="end">End of list</p>`
+    : emptyBox(
+        "You have not raised any request yet. Requests are raised from a deal."
+      );
+  openOnTap(screen);
+}
+
 async function renderApprovals(token) {
   shell("My Approvals", loading(), "home", { back: "#/home" });
   const rows = await get("approvals");
   if (token !== renderToken) {
     return;
   }
+  setWaiting(rows.length);
   const screen = document.getElementById("screen");
   screen.innerHTML = rows.length
     ? `<div class="list" id="list">${rows.map(approvalRow).join("")}</div>
@@ -2318,7 +2444,9 @@ async function renderApprovals(token) {
 
 async function renderApproval(token, params) {
   const id = params.get("id");
-  shell("Request", loading(), "home", { back: "#/approvals" });
+  shell("Request", loading(), "home", {
+    back: params.get("from") === "mine" ? "#/my-requests" : "#/approvals"
+  });
   let r = await get("approvals/detail", { id });
   if (token !== renderToken) {
     return;
@@ -2455,6 +2583,7 @@ async function renderApproval(token, params) {
           : "The request is decided."
       }</p></div>`;
       toast(action === "approve" ? "Approved." : "Rejected.");
+      refreshWaiting();
     } catch (error) {
       if (error instanceof SignedOutError) {
         handleError(error);
@@ -5832,7 +5961,10 @@ function renderMe() {
        <p class="kv"><span>Connected to</span><b>${esc(CONFIG.environment)}</b></p>
        <p class="kv"><span>App version</span><b>${esc(CONFIG.version)}</b></p>
      </div>
-     <a class="button-outline button-link" href="#/approvals">My Approvals</a>
+     <a class="button-outline button-link" href="#/approvals">My Approvals${
+       waitingCount ? " (" + waitingCount + " waiting)" : ""
+     }</a>
+     <a class="button-outline button-link below" href="#/my-requests">My Requests</a>
      <a class="button-outline button-link below" href="#/feedback">Send Feedback</a>
      <button class="button-secondary below" id="sign-out">Sign out</button>`,
     "",
@@ -5842,6 +5974,7 @@ function renderMe() {
     await signOut();
     me = null;
     teamInfo = null;
+    setWaiting(0);
     renderLogin();
   });
 }
@@ -6004,6 +6137,7 @@ async function render() {
       if (token !== renderToken) {
         return;
       }
+      refreshWaiting();
     }
     const { path, params } = routeNow();
     window.scrollTo(0, 0);
@@ -6030,6 +6164,8 @@ async function render() {
       await renderEdit(token, params);
     } else if (path === "approvals") {
       await renderApprovals(token);
+    } else if (path === "my-requests") {
+      await renderMyRequests(token);
     } else if (path === "approval") {
       await renderApproval(token, params);
     } else if (path === "request-price") {
@@ -6087,6 +6223,8 @@ async function start() {
 
 document.addEventListener("visibilitychange", checkForUpdate);
 setInterval(checkForUpdate, 15 * 60 * 1000);
+document.addEventListener("visibilitychange", refreshWaiting);
+setInterval(refreshWaiting, 5 * 60 * 1000);
 
 if ("serviceWorker" in navigator && location.protocol === "https:") {
   navigator.serviceWorker.register("sw.js").catch(() => {});
