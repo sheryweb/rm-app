@@ -76,11 +76,18 @@ export async function startLogin() {
 }
 
 async function tokenRequest(fields) {
-  const response = await fetch(CONFIG.loginUrl + "/services/oauth2/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ client_id: CONFIG.clientId, ...fields })
-  });
+  let response;
+  try {
+    response = await fetch(CONFIG.loginUrl + "/services/oauth2/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ client_id: CONFIG.clientId, ...fields })
+    });
+  } catch (e) {
+    const error = new Error("Salesforce could not be reached.");
+    error.code = "network";
+    throw error;
+  }
   let body = {};
   try {
     body = await response.json();
@@ -110,12 +117,18 @@ export async function completeLoginIfReturning() {
   write(PKCE_KEY, null);
   history.replaceState(null, "", redirectUri() + location.hash);
   if (query.has("error")) {
-    throw new Error(query.get("error_description") || query.get("error"));
+    const error = new Error(
+      query.get("error_description") || query.get("error")
+    );
+    error.code = query.get("error");
+    throw error;
   }
   if (!pkce || pkce.state !== query.get("state")) {
-    throw new Error(
-      "The sign-in did not start on this device. Please try again."
+    const error = new Error(
+      "The sign-in did not start on this device. Please tap Sign in and try again."
     );
+    error.code = "own";
+    throw error;
   }
   const body = await tokenRequest({
     grant_type: "authorization_code",
@@ -129,6 +142,59 @@ export async function completeLoginIfReturning() {
     instance_url: body.instance_url
   });
   return true;
+}
+
+const ADMIN = "Please tell the Salesforce admin.";
+
+/**
+ * Salesforce answers a failed sign-in in its own technical words ("invalid client
+ * credentials"), which a user reads as "my password is wrong". This says in plain words what
+ * happened and who has to act; the technical words are kept as `detail` for the admin.
+ */
+export function explainLoginError(error) {
+  const code = String((error && error.code) || "");
+  const text = String((error && error.message) || "");
+  const all = (code + " " + text).toLowerCase();
+  const has = (...words) => words.some((word) => all.includes(word));
+  if (code === "own") {
+    return { message: text, detail: "" };
+  }
+  let message;
+  if (code === "network") {
+    message =
+      "Salesforce could not be reached. Check your internet connection and try again. If it keeps happening, tell the Salesforce admin.";
+  } else if (has("not admin approved", "app_access_denied", "app_blocked")) {
+    message =
+      "Your Salesforce user does not have access to this app yet. Ask the Salesforce admin to give you RM App Access.";
+  } else if (has("ip restricted", "login hours")) {
+    message =
+      "Salesforce does not allow your user to sign in from this network or at this time. " +
+      ADMIN;
+  } else if (has("inactive user", "inactive_user", "inactive_org")) {
+    message = "Your Salesforce user is not active. " + ADMIN;
+  } else if (code === "access_denied") {
+    message =
+      "The app was not allowed to connect. Tap Sign in again and choose Allow.";
+  } else if (
+    has("invalid_client", "redirect_uri", "unsupported_", "invalid_scope")
+  ) {
+    message =
+      "Your username and password are fine. The app itself is not set up correctly in Salesforce. " +
+      ADMIN;
+  } else if (code === "invalid_grant") {
+    message =
+      "The sign-in took too long or was opened twice. Please tap Sign in and try again.";
+  } else {
+    message =
+      "The sign-in did not finish. Please try again. If it keeps happening, tell the Salesforce admin.";
+  }
+  const detail =
+    code === "network"
+      ? ""
+      : [code, text]
+          .filter((part, i, list) => part && list.indexOf(part) === i)
+          .join(": ");
+  return { message, detail };
 }
 
 let refreshing = null;

@@ -19,6 +19,11 @@ async function authorized(buildUrl, options) {
         ...(options && options.headers),
         Authorization: "Bearer " + t.access_token
       }
+    }).catch(() => {
+      // the browser only says "Failed to fetch": say what it means
+      throw new Error(
+        "Salesforce could not be reached. Check your internet connection and try again."
+      );
     });
   };
   let response = await attempt();

@@ -4,6 +4,7 @@ import {
   isSignedIn,
   startLogin,
   completeLoginIfReturning,
+  explainLoginError,
   signOut
 } from "./auth.js";
 import {
@@ -20,6 +21,8 @@ const PAGE_SIZE = 25;
 let me = null;
 let renderToken = 0;
 let scrollWatcher = null;
+/** The screen shown before Send Feedback was opened: sent along with the feedback. */
+let lastScreen = "";
 
 // ------------------------------------------------------------------ helpers
 
@@ -276,13 +279,15 @@ function handleError(error, target) {
 
 // -------------------------------------------------------------------- login
 
-function renderLogin(message) {
+/** detail = Salesforce's own technical words, shown small so the user can pass them on. */
+function renderLogin(message, detail) {
   root.innerHTML = `
     <section class="login">
       <div class="login-mark">MIRA</div>
       <h1>${esc(CONFIG.appName)}</h1>
       <p>Your leads, deals and unit availability in one place.</p>
       ${message ? errorBox(message) : ""}
+      ${detail ? `<p class="login-detail">Details for the admin: ${esc(detail)}</p>` : ""}
       <button class="button-primary" id="sign-in">Sign in with Salesforce</button>
       <p class="login-foot">${esc(CONFIG.environment)} · v${esc(CONFIG.version)}</p>
     </section>`;
@@ -5828,6 +5833,7 @@ function renderMe() {
        <p class="kv"><span>App version</span><b>${esc(CONFIG.version)}</b></p>
      </div>
      <a class="button-outline button-link" href="#/approvals">My Approvals</a>
+     <a class="button-outline button-link below" href="#/feedback">Send Feedback</a>
      <button class="button-secondary below" id="sign-out">Sign out</button>`,
     "",
     { back: "#/home" }
@@ -5837,6 +5843,139 @@ function renderMe() {
     me = null;
     teamInfo = null;
     renderLogin();
+  });
+}
+
+// ----------------------------------------------------------------- feedback
+
+const FEEDBACK_TYPES = [
+  { key: "problem", label: "Problem" },
+  { key: "suggestion", label: "Suggestion" },
+  { key: "other", label: "Other" }
+];
+
+/** A few words from the user about the app itself, saved in Salesforce for the admin. */
+function renderFeedback() {
+  const from = lastScreen || "home";
+  let type = "problem";
+  shell(
+    "Send Feedback",
+    `<form class="card form" id="feedback-form" novalidate>
+       <div class="form-field">
+         <span>What is it about?</span>
+         <div id="feedback-types"></div>
+       </div>
+       <label class="form-field">
+         <span>Your message *</span>
+         <textarea class="search" rows="6" id="feedback-message" maxlength="5000" placeholder="What happened, or what would make the app better for you?"></textarea>
+       </label>
+       <p class="muted">Sent with your message: your name, the screen you were on (${esc(from.split("?")[0])}), the app version and your phone type.</p>
+       <div id="form-status"></div>
+       <button class="button-primary" type="submit" id="feedback-submit">Send</button>
+       <a class="button-outline button-link" href="#/me">Cancel</a>
+     </form>`,
+    "",
+    { back: "#/me" }
+  );
+  const types = document.getElementById("feedback-types");
+  const drawTypes = () => {
+    types.innerHTML = chips(FEEDBACK_TYPES, type, "type");
+  };
+  drawTypes();
+  types.addEventListener("click", (event) => {
+    const chip = event.target.closest("[data-type]");
+    if (chip) {
+      event.preventDefault();
+      type = chip.dataset.type;
+      drawTypes();
+    }
+  });
+  const status = document.getElementById("form-status");
+  document
+    .getElementById("feedback-form")
+    .addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const message = document.getElementById("feedback-message").value.trim();
+      if (message.length < 5) {
+        status.innerHTML = errorBox(
+          "Please write a few words about what happened or what you would like."
+        );
+        return;
+      }
+      const button = document.getElementById("feedback-submit");
+      button.disabled = true;
+      status.innerHTML = `<div class="working"><span class="spinner"></span><span>Sending…</span></div>`;
+      try {
+        const saved = await post("feedback/save", {
+          type,
+          message,
+          screen: from,
+          appVersion: CONFIG.version,
+          device: navigator.userAgent
+        });
+        toast(`Thank you. Your feedback was sent (${saved.name}).`);
+        location.hash = "#/" + from;
+      } catch (error) {
+        if (error instanceof SignedOutError) {
+          handleError(error);
+          return;
+        }
+        status.innerHTML = errorBox(error.message);
+        button.disabled = false;
+      }
+    });
+}
+
+// -------------------------------------------------------------- new version
+
+let updateOffered = false;
+
+/**
+ * An open app keeps running the screens it started with. This asks the site for the published
+ * version number and, when it differs, offers to load the new screens.
+ */
+async function checkForUpdate() {
+  if (updateOffered || document.visibilityState !== "visible") {
+    return;
+  }
+  try {
+    const response = await fetch("config.js?check=" + Date.now(), {
+      cache: "no-store"
+    });
+    if (!response.ok) {
+      return;
+    }
+    const found = /version:\s*"([^"]+)"/.exec(await response.text());
+    if (found && found[1] !== CONFIG.version) {
+      offerUpdate(found[1]);
+    }
+  } catch (e) {
+    // offline: the next check will tell
+  }
+}
+
+function offerUpdate(version) {
+  updateOffered = true;
+  const bar = document.createElement("div");
+  bar.className = "update-bar";
+  bar.innerHTML = `
+    <span>A new version of the app is ready (v${esc(version)}).</span>
+    <button type="button">Update Now</button>`;
+  document.body.appendChild(bar);
+  bar.querySelector("button").addEventListener("click", async (event) => {
+    event.currentTarget.disabled = true;
+    event.currentTarget.textContent = "Updating…";
+    try {
+      const registration =
+        "serviceWorker" in navigator &&
+        (await navigator.serviceWorker.getRegistration());
+      if (registration) {
+        await registration.update();
+      }
+    } catch (e) {
+      // the reload below still fetches the new screens
+    }
+    location.reload();
   });
 }
 
@@ -5868,6 +6007,9 @@ async function render() {
     }
     const { path, params } = routeNow();
     window.scrollTo(0, 0);
+    if (path !== "feedback" && path !== "me") {
+      lastScreen = location.hash.replace(/^#\/?/, "") || "home";
+    }
     if (path === "leads") {
       await renderLeads(token, params);
     } else if (path === "deals") {
@@ -5918,6 +6060,8 @@ async function render() {
       await renderClientNew(token, params);
     } else if (path === "me") {
       renderMe();
+    } else if (path === "feedback") {
+      renderFeedback();
     } else {
       await renderHome(token);
     }
@@ -5933,12 +6077,16 @@ async function start() {
   try {
     await completeLoginIfReturning();
   } catch (error) {
-    renderLogin(error.message);
+    const problem = explainLoginError(error);
+    renderLogin(problem.message, problem.detail);
     return;
   }
   window.addEventListener("hashchange", render);
   render();
 }
+
+document.addEventListener("visibilitychange", checkForUpdate);
+setInterval(checkForUpdate, 15 * 60 * 1000);
 
 if ("serviceWorker" in navigator && location.protocol === "https:") {
   navigator.serviceWorker.register("sw.js").catch(() => {});

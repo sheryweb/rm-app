@@ -311,6 +311,52 @@ p {
   font-size: 12px;
 }
 
+.login-detail {
+  font-size: 12px;
+  word-break: break-word;
+}
+
+/* ---------- new version ---------- */
+
+.update-bar {
+  position: fixed;
+  left: 12px;
+  right: 12px;
+  bottom: calc(var(--tabbar) + env(safe-area-inset-bottom) + 10px);
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 616px;
+  margin: 0 auto;
+  padding: 10px 10px 10px 16px;
+  border-radius: 16px;
+  background: var(--gold);
+  color: #fff;
+  font-size: 14px;
+  box-shadow: 0 8px 24px rgba(20, 30, 60, 0.3);
+}
+
+.has-offer-bar .update-bar {
+  bottom: calc(var(--tabbar) + env(safe-area-inset-bottom) + 84px);
+}
+
+.update-bar span {
+  flex: 1;
+  min-width: 0;
+}
+
+.update-bar button {
+  flex: none;
+  padding: 9px 14px;
+  border: 0;
+  border-radius: 12px;
+  background: #fff;
+  color: var(--navy);
+  font: inherit;
+  font-weight: 600;
+}
+
 /* ---------- home ---------- */
 
 .hero {
