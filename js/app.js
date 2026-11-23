@@ -2146,13 +2146,10 @@ function openRequestNote(title, open, extraRows) {
 }
 
 /**
- * Who decides first: System Administrator and Sales Admin pick a Sales Director from a list, a
- * Sales Director is their own first approver, and everyone else goes to their line manager.
+ * Who decides first, exactly as Salesforce does it for each request: either this user picks a
+ * Sales Director from a list, or the request goes to their line manager.
  */
 function approverPart(view) {
-  if (view.selfApprover) {
-    return `<p class="muted">As a Sales Director, <b>you are the first approver</b> of this request. Your approval is recorded automatically when you submit, and the request goes straight to the next approver.</p>`;
-  }
   if (view.approvers) {
     return `
       <label class="form-field">
@@ -2166,7 +2163,8 @@ function approverPart(view) {
   return view.lineManager
     ? `<p class="muted">This request goes first to your line manager, <b>${esc(view.lineManager)}</b>.</p>`
     : errorBox(
-        "Your user has no active line manager in Salesforce, so the request has nobody to go to. Ask the Salesforce admin to set your Manager."
+        view.noApproverReason ||
+          "Your user has no active line manager in Salesforce, so the request has nobody to go to. Ask the Salesforce admin to set your Manager."
       );
 }
 
@@ -2236,7 +2234,7 @@ async function renderRequestDld(token, params) {
       </label>
       ${approverPart(view)}
       <div id="form-status"></div>
-      ${view.approvers || view.selfApprover || view.lineManager ? `<button class="button-primary" type="submit" id="request-submit">Submit for Approval</button>` : ""}
+      ${view.approvers || view.lineManager ? `<button class="button-primary" type="submit" id="request-submit">Submit for Approval</button>` : ""}
       <a class="button-outline button-link" href="${esc(back)}">Cancel</a>
     </form>`;
 
@@ -2520,9 +2518,7 @@ async function renderRequestPrice(token, params) {
   const discounted = (percent) =>
     Math.round(info.currentPrice * (1 - percent / 100));
   // System Administrator and Sales Admin pick the first approver; everyone else needs a manager
-  const canSubmit = Boolean(
-    view.approvers || view.selfApprover || view.lineManager
-  );
+  const canSubmit = Boolean(view.approvers || view.lineManager);
   screen.innerHTML = `
     ${summary}
     <form class="card form" id="request-form" novalidate>
@@ -2642,9 +2638,7 @@ async function renderRequestShare(token, params) {
 
   const rms = view.rms || [];
   // System Administrator and Sales Admin pick the first approver; everyone else needs a manager
-  const canSubmit = Boolean(
-    view.approvers || view.selfApprover || view.lineManager
-  );
+  const canSubmit = Boolean(view.approvers || view.lineManager);
   screen.innerHTML = `
     ${summary}
     ${
@@ -2870,9 +2864,7 @@ async function renderRequestPlan(token, params) {
       state.approverId = approver.value;
     }
   };
-  const canSubmit = Boolean(
-    view.approvers || view.selfApprover || view.lineManager
-  );
+  const canSubmit = Boolean(view.approvers || view.lineManager);
 
   function drawEditor() {
     const row = state.editing;
