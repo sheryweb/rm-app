@@ -1060,7 +1060,7 @@ function barList(items, emptyMessage) {
         <div class="progress-track"><div class="progress-fill" style="width:${item.value > 0 ? Math.max(2, Math.round((item.value / top) * 100)) : 0}%"></div></div>
         ${item.note ? `<small>${esc(item.note)}</small>` : ""}`;
       return item.drill
-        ? `<button type="button" class="progress bar-button${item.selected ? " is-selected" : ""}" data-drill="${esc(JSON.stringify(item.drill))}">${inner}</button>`
+        ? `<button type="button" class="progress drill-bar${item.selected ? " is-selected" : ""}" data-drill="${esc(JSON.stringify(item.drill))}">${inner}</button>`
         : `<div class="progress${item.selected ? " is-selected" : ""}">${inner}</div>`;
     })
     .join("");
@@ -1820,6 +1820,7 @@ const DEAL_STEPS = [
   { key: "booked", label: "Booked" },
   { key: "reserved", label: "Reserved" },
   { key: "sold", label: "Sold" },
+  { key: "shared", label: "Shared" },
   { key: "stuck", label: "Stuck" },
   { key: "bookingForm", label: "Booking Form" }
 ];
@@ -1878,7 +1879,7 @@ function renderDeals(token, params) {
     document.getElementById("list"),
     (offset) => get("deals", { step, search, pageSize: PAGE_SIZE, offset }),
     dealRow,
-    "No deals here.",
+    step === "shared" ? "You have no shared deals." : "No deals here.",
     token
   );
 }
