@@ -1745,3 +1745,108 @@ a.button-outline {
   color: var(--muted);
   font-weight: 400;
 }
+
+/* ---------- install hint ---------- */
+
+.install-card {
+  margin: 14px 0 0;
+  border: 1px solid var(--gold);
+}
+
+.install-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.install-head img {
+  flex: none;
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+}
+
+.install-head b {
+  font-size: 16px;
+}
+
+.install-actions {
+  display: grid;
+  grid-template-columns: 1fr 1.4fr;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.install-actions .button-plain,
+.install-actions .button-primary {
+  min-height: 46px;
+}
+
+.install-login {
+  margin-top: 6px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.install-login p {
+  margin-bottom: 10px;
+  font-size: 13px;
+}
+
+.install-steps {
+  margin: 16px 0 6px;
+  padding: 0;
+  list-style: none;
+}
+
+.install-steps li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 0;
+}
+
+.install-steps li + li {
+  border-top: 1px solid var(--line);
+}
+
+.install-steps p {
+  flex: 1;
+  min-width: 0;
+}
+
+.install-number {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--navy);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.install-icon {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  background: var(--info-bg);
+  color: var(--info);
+}
+
+.install-icon svg {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}

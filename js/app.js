@@ -322,9 +322,243 @@ function handleError(error, target) {
   );
 }
 
+// ------------------------------------------------------------------ install
+
+const INSTALL_LATER_KEY = "mira-rm-install-later";
+const INSTALL_QUIET_DAYS = 14;
+/** Android (and desktop Chrome / Edge) hand this over when the app can be installed in one tap. */
+let installEvent = null;
+
+function isInstalled() {
+  return (
+    navigator.standalone === true ||
+    window.matchMedia("(display-mode: standalone)").matches ||
+    window.matchMedia("(display-mode: fullscreen)").matches
+  );
+}
+
+function isIphone() {
+  return (
+    /iPhone|iPad|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1)
+  );
+}
+
+/**
+ * How this phone can install the app: "prompt" = one tap, the browser does it;
+ * "iphone" / "android" = the user does it from the browser menu, so we show the steps;
+ * "" = already installed, or a browser that cannot install.
+ */
+function installMode() {
+  if (isInstalled()) {
+    return "";
+  }
+  if (installEvent) {
+    return "prompt";
+  }
+  if (isIphone()) {
+    return "iphone";
+  }
+  return /Android/.test(navigator.userAgent) ? "android" : "";
+}
+
+function installQuiet() {
+  try {
+    const until = Number(localStorage.getItem(INSTALL_LATER_KEY) || 0);
+    return until > Date.now();
+  } catch (e) {
+    return false;
+  }
+}
+
+/** The hint for one place: "login", "home" or "me". Empty when there is nothing to offer. */
+function installHint(place) {
+  const mode = installMode();
+  if (!mode) {
+    return "";
+  }
+  const action = mode === "prompt" ? "Install App" : "How to Install";
+  if (place === "me") {
+    return `<button class="button-outline below" type="button" data-install="go">${
+      mode === "prompt" ? "Install App" : "Install App on This Phone"
+    }</button>`;
+  }
+  if (place === "login") {
+    return `
+      <div class="install-login">
+        <p>${
+          mode === "iphone"
+            ? "Tip: add the app to your Home Screen first, then sign in from its icon."
+            : "Tip: install the app to open it from your home screen."
+        }</p>
+        <button class="button-outline" type="button" data-install="go">${action}</button>
+      </div>`;
+  }
+  // home: only where it is one tap or the iPhone steps, and not after "Not Now"
+  if (mode === "android" || installQuiet()) {
+    return "";
+  }
+  return `
+    <div class="card install-card">
+      <div class="install-head">
+        <img src="icons/icon-192.png" alt="" />
+        <div>
+          <b>Install ${esc(CONFIG.appName)}</b>
+          <p class="muted">Open it from your home screen like any other app, without the browser.</p>
+        </div>
+      </div>
+      <div class="install-actions">
+        <button class="button-plain" type="button" data-install="later">Not Now</button>
+        <button class="button-primary" type="button" data-install="go">${action}</button>
+      </div>
+    </div>`;
+}
+
+function installSlot(place) {
+  return `<div data-install-slot="${place}">${installHint(place)}</div>`;
+}
+
+/** Redraws every hint on the screen: the phone may offer (or finish) the install at any moment. */
+function refreshInstallHints() {
+  document.querySelectorAll("[data-install-slot]").forEach((slot) => {
+    slot.innerHTML = installHint(slot.dataset.installSlot);
+  });
+}
+
+const SHARE_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V3M8 7l4-4 4 4M6 11H5a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-8a1 1 0 0 0-1-1h-1"/></svg>`;
+const ADD_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1zM12 8v8M8 12h8"/></svg>`;
+const MENU_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5.5v.01M12 12v.01M12 18.5v.01"/></svg>`;
+
+function installSteps(mode) {
+  const name = esc(CONFIG.appName);
+  if (mode === "iphone") {
+    const safari = !/CriOS|EdgiOS|FxiOS|OPiOS/.test(navigator.userAgent);
+    return [
+      {
+        icon: SHARE_ICON,
+        text: `Tap the <b>Share</b> button ${
+          safari
+            ? "in the bar at the bottom of Safari"
+            : "next to the address at the top"
+        }. If you do not see it, tap <b>•••</b> first.`
+      },
+      {
+        icon: ADD_ICON,
+        text: "Scroll down the list and tap <b>Add to Home Screen</b>."
+      },
+      {
+        text: `Tap <b>Add</b>. The ${name} icon is now on your Home Screen.`
+      },
+      {
+        text: `Open ${name} from that icon and sign in there. From then on you stay signed in.`
+      }
+    ];
+  }
+  return [
+    {
+      icon: MENU_ICON,
+      text: "Tap the browser <b>menu</b> (three dots, top right; in Samsung Internet the three lines at the bottom)."
+    },
+    {
+      icon: ADD_ICON,
+      text: "Tap <b>Add to Home screen</b> or <b>Install app</b>."
+    },
+    {
+      text: `Tap <b>Install</b>. The ${name} icon is now on your home screen.`
+    }
+  ];
+}
+
+function openInstallSheet(mode) {
+  closeSheet();
+  const steps = installSteps(mode)
+    .map(
+      (step, index) => `
+      <li>
+        <span class="install-number">${index + 1}</span>
+        <p>${step.text}</p>
+        ${step.icon ? `<span class="install-icon">${step.icon}</span>` : ""}
+      </li>`
+    )
+    .join("");
+  const backdrop = document.createElement("div");
+  backdrop.className = "sheet-backdrop";
+  backdrop.innerHTML = `
+    <div class="sheet" role="dialog" aria-modal="true">
+      <h2>Install ${esc(CONFIG.appName)}</h2>
+      <p class="muted">It takes a few seconds and is done only once.</p>
+      <ol class="install-steps">${steps}</ol>
+      <button class="button-primary" type="button" data-install="close">Got It</button>
+    </div>`;
+  document.body.appendChild(backdrop);
+  backdrop.addEventListener("click", (event) => {
+    if (event.target === backdrop) {
+      closeSheet();
+    }
+  });
+}
+
+async function installNow() {
+  const mode = installMode();
+  if (mode !== "prompt") {
+    if (mode) {
+      openInstallSheet(mode);
+    }
+    return;
+  }
+  const asked = installEvent;
+  // the browser allows one question per event
+  installEvent = null;
+  try {
+    await asked.prompt();
+    await asked.userChoice;
+  } catch (e) {
+    // the browser refused to ask: the hints below fall back to the steps
+  }
+  refreshInstallHints();
+}
+
+window.addEventListener("beforeinstallprompt", (event) => {
+  event.preventDefault();
+  installEvent = event;
+  refreshInstallHints();
+});
+
+window.addEventListener("appinstalled", () => {
+  installEvent = null;
+  document
+    .querySelectorAll("[data-install-slot]")
+    .forEach((slot) => (slot.innerHTML = ""));
+  toast(`${CONFIG.appName} is installed. Open it from your home screen.`);
+});
+
+document.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-install]");
+  if (!button) {
+    return;
+  }
+  const action = button.dataset.install;
+  if (action === "go") {
+    installNow();
+  } else if (action === "close") {
+    closeSheet();
+  } else if (action === "later") {
+    try {
+      localStorage.setItem(
+        INSTALL_LATER_KEY,
+        String(Date.now() + INSTALL_QUIET_DAYS * 86400000)
+      );
+    } catch (e) {
+      // private mode: the card simply comes back next time
+    }
+    refreshInstallHints();
+    toast("You can install the app any time from the Me screen.");
+  }
+});
+
 // -------------------------------------------------------------------- login
 
-/** detail = Salesforce's own technical words, shown small so the user can pass them on. */
+/** detail =Salesforce's own technical words, shown small so the user can pass them on. */
 function renderLogin(message, detail) {
   root.innerHTML = `
     <section class="login">
@@ -334,6 +568,7 @@ function renderLogin(message, detail) {
       ${message ? errorBox(message) : ""}
       ${detail ? `<p class="login-detail">Details for the admin: ${esc(detail)}</p>` : ""}
       <button class="button-primary" id="sign-in">Sign in with Salesforce</button>
+      ${installSlot("login")}
       <p class="login-foot">${esc(CONFIG.environment)} · v${esc(CONFIG.version)}</p>
     </section>`;
   document.getElementById("sign-in").addEventListener("click", (event) => {
@@ -461,6 +696,7 @@ async function renderHome(token) {
       <span>${new Date().toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long" })}</span>
     </section>
 
+    ${installSlot("home")}
     ${
       waitingNow
         ? `<a class="alert-row approvals-alert" href="#/approvals"><b>${waitingNow} request${waitingNow === 1 ? "" : "s"} waiting for your approval</b><span>›</span></a>`
@@ -5966,6 +6202,7 @@ function renderMe() {
      }</a>
      <a class="button-outline button-link below" href="#/my-requests">My Requests</a>
      <a class="button-outline button-link below" href="#/feedback">Send Feedback</a>
+     ${installSlot("me")}
      <button class="button-secondary below" id="sign-out">Sign out</button>`,
     "",
     { back: "#/home" }
