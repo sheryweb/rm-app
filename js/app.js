@@ -2375,6 +2375,11 @@ async function renderDeal(token, params) {
              <a class="button-outline button-link below" href="#/request-price?deal=${esc(deal.id)}">Unit Price Change</a>
              <a class="button-outline button-link below" href="#/request-share?deal=${esc(deal.id)}">Share Deal</a>
              <a class="button-outline button-link below" href="#/request-plan?deal=${esc(deal.id)}">Payment Plan Change</a>
+             ${
+               deal.stage === "Booked"
+                 ? `<a class="button-outline button-link below button-reject" href="#/request-cancel?deal=${esc(deal.id)}">Request Cancellation</a>`
+                 : ""
+             }
            </div>`
     }
     <div id="requests-box"></div>
@@ -2405,6 +2410,9 @@ const REQUEST_STATUS_PILL = {
 
 /** "Registration_Fees__c" is the field's technical name; show it in plain words. */
 function plainFieldName(apiName) {
+  if (apiName === "StageName") {
+    return "Deal stage";
+  }
   return String(apiName || "")
     .replace(/__c$/, "")
     .replace(/_/g, " ")
@@ -2597,6 +2605,127 @@ async function renderRequestDld(token, params) {
   });
 }
 
+/**
+ * Request Cancellation: a reason, then two approvals (line manager, then Sales Admin). Only the
+ * final approval cancels the deal, and that cannot be undone, so the request is confirmed with
+ * a second tap before it is sent.
+ */
+async function renderRequestCancel(token, params) {
+  const dealId = params.get("deal");
+  const back = "#/deal?id=" + dealId;
+  shell("Request Cancellation", loading(), "deals", { back });
+  const view = await get("requests/cancellation", { dealId });
+  if (token !== renderToken) {
+    return;
+  }
+  const info = view.info || {};
+  const screen = document.getElementById("screen");
+  const summary = `
+    <div class="card">
+      ${field("Deal", info.opportunityName)}
+      ${field("Client", info.accountName)}
+      ${field("Unit", [info.projectName, info.unitTitle].filter(Boolean).join(" · "))}
+      ${field("Stage", info.stageName)}
+      ${field("Deal owner", info.ownerName)}
+    </div>`;
+
+  if (view.open) {
+    screen.innerHTML =
+      summary +
+      openRequestNote(
+        "Cancellation request",
+        view.open,
+        field("Requested by", view.open.requesterName)
+      ) +
+      `<a class="button-outline button-link" href="#/approval?id=${esc(view.open.approvalRequestId)}">Open Request</a>`;
+    return;
+  }
+  if (!info.eligible) {
+    screen.innerHTML =
+      summary +
+      errorBox(
+        info.ineligibleReason ||
+          "A cancellation cannot be requested for this deal now."
+      );
+    return;
+  }
+
+  screen.innerHTML = `
+    ${summary}
+    <div class="notice notice-warn notice-left">
+      <b>What happens</b>
+      <p>The deal stays Booked while the request is waiting. Two approvals are needed: your line manager first, then Sales Admin. After the final approval the deal is cancelled and the unit is released. This cannot be undone.</p>
+    </div>
+    <form class="card form" id="request-form" novalidate>
+      <label class="form-field">
+        <span>Reason for cancellation * (at least 10 characters)</span>
+        <textarea class="search" rows="4" id="request-justification" maxlength="255" placeholder="Why should this deal be cancelled?"></textarea>
+      </label>
+      ${approverPart(view)}
+      <div id="form-status"></div>
+      ${view.approvers || view.lineManager ? `<button class="button-primary" type="submit" id="request-submit">Submit for Approval</button>` : ""}
+      <a class="button-outline button-link" href="${esc(back)}">Cancel</a>
+    </form>`;
+
+  const form = document.getElementById("request-form");
+  const status = document.getElementById("form-status");
+  const button = document.getElementById("request-submit");
+  let confirmed = false;
+  const unconfirm = () => {
+    if (confirmed && button) {
+      confirmed = false;
+      button.textContent = "Submit for Approval";
+      status.innerHTML = "";
+    }
+  };
+  // a change after the first tap asks for the confirmation again
+  form.addEventListener("input", unconfirm);
+  form.addEventListener("change", unconfirm);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const justification = document
+      .getElementById("request-justification")
+      .value.trim();
+    const approver = document.getElementById("request-approver");
+    const problem =
+      justification.length < 10
+        ? "Please write a reason of at least 10 characters."
+        : approver && !approver.value
+          ? "Please choose the first approver."
+          : "";
+    if (problem) {
+      status.innerHTML = errorBox(problem);
+      return;
+    }
+    if (!confirmed) {
+      confirmed = true;
+      button.textContent = "Tap Again to Send the Request";
+      status.innerHTML = `<div class="notice notice-warn">You are asking to cancel <b>${esc(info.opportunityName)}</b>. Tap again to send the request.</div>`;
+      return;
+    }
+    button.disabled = true;
+    status.innerHTML = `<div class="working"><span class="spinner"></span><span>Submitting…</span></div>`;
+    try {
+      await post("requests/cancellation/submit", {
+        dealId,
+        justification,
+        approverId: approver ? approver.value : null
+      });
+      toast("Cancellation request submitted.");
+      location.hash = back;
+    } catch (error) {
+      if (error instanceof SignedOutError) {
+        handleError(error);
+        return;
+      }
+      confirmed = false;
+      button.textContent = "Submit for Approval";
+      status.innerHTML = errorBox(error.message);
+      button.disabled = false;
+    }
+  });
+}
+
 function approvalRow(r) {
   return `
     <article class="row is-link" data-open="#/approval?id=${esc(r.id)}">
@@ -2738,6 +2867,11 @@ async function renderApproval(token, params) {
         ${field("Requested by", r.requester)}
         ${field("Requested on", dateTime12(r.requestDate))}
         ${field("Justification", r.justification)}
+        ${
+          r.requestType === "Cancellation"
+            ? `<div class="notice notice-warn notice-left"><p>Two approvals are needed: the line manager first, then Sales Admin. On the final approval the deal is cancelled and the unit is released. This cannot be undone.</p></div>`
+            : ""
+        }
       </div>
       ${planComparison(r.paymentPlan)}
       <div class="card">
@@ -6418,6 +6552,8 @@ async function render() {
       await renderRequestShare(token, params);
     } else if (path === "request-dld") {
       await renderRequestDld(token, params);
+    } else if (path === "request-cancel") {
+      await renderRequestCancel(token, params);
     } else if (path === "deal-owners") {
       await renderDealOwners(token, params);
     } else if (path === "booking-new") {
