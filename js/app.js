@@ -971,13 +971,14 @@ async function renderTeamDeals(token, params) {
     return;
   }
   document.getElementById("screen").innerHTML = `
-    ${scopeChips("team")}
+    ${dealsTop("team", "list")}
     ${chips(TEAM_DEAL_STEPS, step, "step")}
     ${memberSelect(team, owner)}
     <input class="search" id="search" type="search" placeholder="Search client or unit" value="${esc(search)}" />
     <div class="list" id="list"></div>`;
   const current = { scope: "team", owner, step, search };
   wireTeamList("deals", current);
+  wireViewSwitch();
   root
     .querySelectorAll("[data-step]")
     .forEach((button) =>
@@ -1870,7 +1871,255 @@ function dealRow(deal) {
     </article>`;
 }
 
+// ------------------------------------------------- deals: list or board view
+// Each RM picks how the deals screens look, a list or a board (one column per step), and
+// can change it at any time. The choice is kept on the device, so it survives signing out.
+
+const DEALS_VIEW_KEY = "rmapp.dealsView";
+const DEAL_VIEWS = [
+  { key: "list", label: "List", icon: "M4 6h16M4 12h16M4 18h16" },
+  { key: "board", label: "Board", icon: "M5 4v16M12 4v11M19 4v14" }
+];
+const BOARD_PAGE = 15;
+
+function dealsView() {
+  try {
+    return localStorage.getItem(DEALS_VIEW_KEY) === "board" ? "board" : "list";
+  } catch (e) {
+    return "list";
+  }
+}
+
+/** The Mine / Team chips (directors only) and the List / Board switch, on one line. */
+function dealsTop(scope, view) {
+  const options = DEAL_VIEWS.map(
+    (v) => `
+      <button class="view-option${v.key === view ? " is-active" : ""}" data-view="${v.key}" aria-pressed="${v.key === view}">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="${v.icon}"/></svg>
+        <span>${v.label}</span>
+      </button>`
+  ).join("");
+  return `<div class="list-top">${scopeChips(scope)}
+    <div class="view-switch" role="group" aria-label="View">${options}</div></div>`;
+}
+
+function wireViewSwitch() {
+  root.querySelectorAll("[data-view]").forEach((button) =>
+    button.addEventListener("click", () => {
+      try {
+        localStorage.setItem(DEALS_VIEW_KEY, button.dataset.view);
+      } catch (e) {
+        // storage is blocked: the view cannot be remembered, the list stays
+      }
+      render();
+    })
+  );
+}
+
+function boardCard(deal) {
+  const opens = deal.kind === "deal";
+  const flags = [
+    deal.stuck ? `<span class="pill pill-urgent">Stuck</span>` : "",
+    deal.sharedWith
+      ? `<span class="pill pill-info">Shared with ${esc(deal.sharedWith)}</span>`
+      : ""
+  ].join(" ");
+  return `
+    <article class="row board-card${opens ? " is-link" : ""}"${opens ? ` data-open="#/deal?id=${esc(deal.id)}"` : ""}>
+      <h4>${esc(deal.client || deal.title)}</h4>
+      <p class="muted">${esc([deal.project, deal.unit].filter(Boolean).join(" · "))}</p>
+      <p class="muted">${days(deal.daysInStep)} in this step${
+        deal.stepDate ? " · since " + esc(shortDate(deal.stepDate)) : ""
+      }</p>
+      ${flags.trim() ? `<p class="board-flags">${flags}</p>` : ""}
+      ${deal.ownerName ? `<p class="muted">RM: <b>${esc(deal.ownerName)}</b></p>` : ""}
+      ${deal.nextAction ? `<p class="next">${esc(deal.nextAction)}</p>` : ""}
+    </article>`;
+}
+
+function boardColumn(column) {
+  const rows = column.rows || [];
+  return `
+    <section class="board-col board-${esc(column.key)}" data-col="${esc(column.key)}">
+      <header class="board-head">
+        <h3>${esc(column.label)}</h3>
+        <span class="board-count">${column.count || 0}</span>
+      </header>
+      <div class="board-body">
+        ${rows.map(boardCard).join("")}
+        ${rows.length ? "" : `<p class="board-empty">No deals in this step</p>`}
+        ${column.hasMore ? `<div class="sentinel"></div>` : ""}
+      </div>
+    </section>`;
+}
+
+/** The board fills the screen down to the tab bar; each column scrolls on its own. */
+function sizeBoard() {
+  const board = document.getElementById("board");
+  if (!board) {
+    return;
+  }
+  const tabbar = document.querySelector(".tabbar");
+  const bottom = tabbar
+    ? tabbar.getBoundingClientRect().top
+    : window.innerHeight;
+  const top = board.getBoundingClientRect().top + window.scrollY;
+  board.style.height = Math.max(280, bottom - top - 8) + "px";
+}
+window.addEventListener("resize", sizeBoard);
+
+/** My Deals or Team Deals as a board. Only for looking: a deal moves by its real steps. */
+async function renderDealsBoard(token, params) {
+  const team = isTeamScope(params);
+  const owner = team ? params.get("owner") || "" : "";
+  const step = params.get("step") || "";
+  const search = params.get("search") || "";
+  shell(team ? "Team Deals" : "My Deals", loading(), "deals");
+  const [teamInfoNow, board] = await Promise.all([
+    team ? loadTeam() : null,
+    team
+      ? get("team/deals/board", {
+          ownerId: owner,
+          search,
+          pageSize: BOARD_PAGE
+        })
+      : get("deals/board", { search, pageSize: BOARD_PAGE })
+  ]);
+  if (token !== renderToken) {
+    return;
+  }
+  const columns = board.columns || [];
+  const screen = document.getElementById("screen");
+  screen.classList.add("screen-wide");
+  screen.innerHTML = `
+    ${dealsTop(team ? "team" : "mine", "board")}
+    ${team ? memberSelect(teamInfoNow, owner) : ""}
+    <input class="search" id="search" type="search" placeholder="Search client or unit" value="${esc(search)}" />
+    <div class="board-jump">${chips(
+      columns.map((c) => ({ key: c.key, label: c.label, count: c.count || 0 })),
+      columns.length ? columns[0].key : "",
+      "col"
+    )}</div>
+    <div class="board" id="board">${columns.map(boardColumn).join("")}</div>`;
+
+  // the list's step is carried along, so switching back to the list lands where it was
+  const current = { search };
+  if (team) {
+    current.scope = "team";
+    current.owner = owner;
+  }
+  if (step) {
+    current.step = step;
+  }
+  wireTeamList("deals", current);
+  wireViewSwitch();
+
+  const boardEl = document.getElementById("board");
+  openOnTap(boardEl);
+  sizeBoard();
+
+  // the chips above the board jump to a column and show which one is in front
+  const jumps = Array.from(root.querySelectorAll("[data-col].chip"));
+  const columnEls = Array.from(boardEl.querySelectorAll(".board-col"));
+  jumps.forEach((chip) =>
+    chip.addEventListener("click", () => {
+      const target = columnEls.find(
+        (el) => el.dataset.col === chip.dataset.col
+      );
+      boardEl.scrollTo({
+        left: target.offsetLeft - boardEl.offsetLeft,
+        behavior: "smooth"
+      });
+    })
+  );
+  let marking = false;
+  boardEl.addEventListener(
+    "scroll",
+    () => {
+      if (marking) {
+        return;
+      }
+      marking = true;
+      requestAnimationFrame(() => {
+        marking = false;
+        const left = boardEl.getBoundingClientRect().left;
+        let front = columnEls[0];
+        columnEls.forEach((el) => {
+          if (
+            Math.abs(el.getBoundingClientRect().left - left) <
+            Math.abs(front.getBoundingClientRect().left - left)
+          ) {
+            front = el;
+          }
+        });
+        jumps.forEach((chip) =>
+          chip.classList.toggle(
+            "is-active",
+            Boolean(front) && chip.dataset.col === front.dataset.col
+          )
+        );
+      });
+    },
+    { passive: true }
+  );
+
+  // each column loads its next page when its end comes into view
+  const loaded = new Map(columns.map((c) => [c.key, (c.rows || []).length]));
+  const busy = new Set();
+  async function more(sentinel) {
+    const key = sentinel.closest(".board-col").dataset.col;
+    if (busy.has(key) || token !== renderToken) {
+      return;
+    }
+    busy.add(key);
+    sentinel.innerHTML = loading();
+    try {
+      const query = {
+        step: key,
+        search,
+        pageSize: BOARD_PAGE,
+        offset: loaded.get(key)
+      };
+      const page = team
+        ? await get("team/deals", { ...query, ownerId: owner })
+        : await get("deals", query);
+      if (token !== renderToken) {
+        return;
+      }
+      const rows = page.rows || [];
+      sentinel.innerHTML = "";
+      sentinel.insertAdjacentHTML("beforebegin", rows.map(boardCard).join(""));
+      loaded.set(key, loaded.get(key) + rows.length);
+      scrollWatcher.unobserve(sentinel);
+      if (page.hasMore && rows.length) {
+        // watched afresh: if the column is still not full this loads the next page at once
+        scrollWatcher.observe(sentinel);
+      } else {
+        sentinel.remove();
+      }
+    } catch (e) {
+      scrollWatcher.unobserve(sentinel);
+      handleError(e, sentinel);
+    } finally {
+      busy.delete(key);
+    }
+  }
+  scrollWatcher = new IntersectionObserver((entries) =>
+    entries.forEach((entry) => {
+      if (entry.isIntersecting) {
+        more(entry.target);
+      }
+    })
+  );
+  boardEl
+    .querySelectorAll(".sentinel")
+    .forEach((sentinel) => scrollWatcher.observe(sentinel));
+}
+
 function renderDeals(token, params) {
+  if (dealsView() === "board") {
+    return renderDealsBoard(token, params);
+  }
   if (isTeamScope(params)) {
     return renderTeamDeals(token, params);
   }
@@ -1878,12 +2127,13 @@ function renderDeals(token, params) {
   const search = params.get("search") || "";
   shell(
     "My Deals",
-    `${scopeChips("mine")}${chips(DEAL_STEPS, step, "step")}
+    `${dealsTop("mine", "list")}${chips(DEAL_STEPS, step, "step")}
      <input class="search" id="search" type="search" placeholder="Search client or unit" value="${esc(search)}" />
      <div class="list" id="list"></div>`,
     "deals"
   );
   wireTeamList("deals", null);
+  wireViewSwitch();
   root
     .querySelectorAll("[data-step]")
     .forEach((button) =>
@@ -2401,7 +2651,7 @@ async function renderDeal(token, params) {
              <a class="button-outline button-link below" href="#/request-plan?deal=${esc(deal.id)}">Payment Plan Change</a>
              ${
                deal.stage === "Booked"
-                 ? `<a class="button-outline button-link below button-reject" href="#/request-cancel?deal=${esc(deal.id)}">Request Cancellation</a>`
+                 ? `<a class="button-outline button-link below button-reject" href="#/request-cancel?deal=${esc(deal.id)}">${me && me.canCancelDirectly ? "Cancel the Deal" : "Request Cancellation"}</a>`
                  : ""
              }
            </div>`
@@ -2633,6 +2883,9 @@ async function renderRequestDld(token, params) {
  * Request Cancellation: a reason, then two approvals (line manager, then Sales Admin). Only the
  * final approval cancels the deal, and that cannot be undone, so the request is confirmed with
  * a second tap before it is sent.
+ *
+ * A user who holds the Cancel Deals Directly permission raises no request: the screen asks
+ * for a confirmation and the deal is cancelled at once.
  */
 async function renderRequestCancel(token, params) {
   const dealId = params.get("deal");
@@ -2643,6 +2896,10 @@ async function renderRequestCancel(token, params) {
     return;
   }
   const info = view.info || {};
+  const direct = info.canCancelDirectly === true;
+  if (direct) {
+    root.querySelector(".topbar h1").textContent = "Cancel the Deal";
+  }
   const screen = document.getElementById("screen");
   const summary = `
     <div class="card">
@@ -2669,8 +2926,43 @@ async function renderRequestCancel(token, params) {
       summary +
       errorBox(
         info.ineligibleReason ||
-          "A cancellation cannot be requested for this deal now."
+          (direct
+            ? "This deal cannot be cancelled now."
+            : "A cancellation cannot be requested for this deal now.")
       );
+    return;
+  }
+
+  if (direct) {
+    screen.innerHTML = `
+      ${summary}
+      <div class="notice notice-warn notice-left">
+        <b>Are you sure?</b>
+        <p>The deal is cancelled at once, with no approval request, and the unit is released. This cannot be undone.</p>
+      </div>
+      <div class="card form">
+        <div id="form-status"></div>
+        <button class="button-primary button-reject" type="button" id="cancel-now">Yes, Cancel the Deal</button>
+        <a class="button-outline button-link" href="${esc(back)}">No, Keep the Deal</a>
+      </div>`;
+    const cancelNow = document.getElementById("cancel-now");
+    const cancelStatus = document.getElementById("form-status");
+    cancelNow.addEventListener("click", async () => {
+      cancelNow.disabled = true;
+      cancelStatus.innerHTML = `<div class="working"><span class="spinner"></span><span>Cancelling…</span></div>`;
+      try {
+        await post("requests/cancellation/direct", { dealId });
+        toast("The deal is cancelled.");
+        location.hash = back;
+      } catch (error) {
+        if (error instanceof SignedOutError) {
+          handleError(error);
+          return;
+        }
+        cancelStatus.innerHTML = errorBox(error.message);
+        cancelNow.disabled = false;
+      }
+    });
     return;
   }
 
