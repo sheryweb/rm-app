@@ -1,10 +1,39 @@
 // Calls the RmAppApi services in Salesforce as the signed-in RM.
 import { CONFIG } from "../config.js";
-import { tokens, refreshAccessToken } from "./auth.js";
+import {
+  tokens,
+  refreshAccessToken,
+  forgetLogin,
+  isTemporary,
+  isInactiveUser
+} from "./auth.js";
 
 export class SignedOutError extends Error {}
 
+/** Sent on `window` the moment Salesforce refuses this device's login. */
+export const SIGNED_OUT_EVENT = "rmapp-signed-out";
+
 const SIGNED_OUT = "Your sign-in has ended. Please sign in again.";
+const INACTIVE =
+  "Your Salesforce user is not active. Please tell the Salesforce admin.";
+
+/**
+ * Salesforce no longer accepts this login (user deactivated, login revoked or expired). The
+ * saved login is removed at once and the app is told, so the sign-in screen replaces whatever
+ * is open, whichever screen or button made the call and however it shows its own errors.
+ */
+function signedOut(message) {
+  forgetLogin();
+  // after the caller's own error handling, so the sign-in screen is what stays
+  setTimeout(
+    () =>
+      window.dispatchEvent(
+        new CustomEvent(SIGNED_OUT_EVENT, { detail: message })
+      ),
+    0
+  );
+  return new SignedOutError(message);
+}
 
 /** Sends a request with the RM's token; when the token has expired, renews it once and retries. */
 async function authorized(buildUrl, options) {
@@ -31,11 +60,17 @@ async function authorized(buildUrl, options) {
     try {
       await refreshAccessToken();
     } catch (e) {
-      throw new SignedOutError(SIGNED_OUT);
+      if (isTemporary(e)) {
+        // offline or a Salesforce outage: the login itself may be fine, so it is kept
+        throw new Error(
+          "Salesforce could not be reached. Check your internet connection and try again."
+        );
+      }
+      throw signedOut(isInactiveUser(e) ? INACTIVE : SIGNED_OUT);
     }
     response = await attempt();
     if (response.status === 401) {
-      throw new SignedOutError(SIGNED_OUT);
+      throw signedOut(SIGNED_OUT);
     }
   }
   return response;

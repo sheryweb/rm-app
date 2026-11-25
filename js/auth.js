@@ -98,10 +98,33 @@ async function tokenRequest(fields) {
     const error = new Error(
       body.error_description || body.error || "Sign-in failed"
     );
-    error.code = body.error;
+    // no OAuth answer at all = Salesforce itself is having trouble, not a refused login
+    error.code = body.error || "unavailable";
     throw error;
   }
   return body;
+}
+
+/** Removes the login saved on this device (the sign-in screen shows on the next step). */
+export function forgetLogin() {
+  write(TOKENS_KEY, null);
+}
+
+/** True when a failed token request says nothing about the login itself (offline, outage). */
+export function isTemporary(error) {
+  return Boolean(
+    error && (error.code === "network" || error.code === "unavailable")
+  );
+}
+
+/** True when Salesforce refused the login because the user was deactivated. */
+export function isInactiveUser(error) {
+  const all = (
+    String((error && error.code) || "") +
+    " " +
+    String((error && error.message) || "")
+  ).toLowerCase();
+  return all.includes("inactive user") || all.includes("inactive_user");
 }
 
 /**
@@ -203,26 +226,47 @@ let refreshing = null;
 export function refreshAccessToken() {
   if (!refreshing) {
     refreshing = (async () => {
-      const current = tokens();
-      if (!current || !current.refresh_token) {
-        throw new Error("Please sign in again.");
-      }
-      try {
-        const body = await tokenRequest({
-          grant_type: "refresh_token",
-          refresh_token: current.refresh_token
-        });
-        write(TOKENS_KEY, {
-          access_token: body.access_token,
-          // rotation: Salesforce sends a new refresh token and retires the old one
-          refresh_token: body.refresh_token || current.refresh_token,
-          instance_url: body.instance_url || current.instance_url
-        });
-      } catch (e) {
-        if (e.code === "invalid_grant") {
-          write(TOKENS_KEY, null);
+      let current = tokens();
+      for (;;) {
+        if (!current || !current.refresh_token) {
+          const error = new Error("Please sign in again.");
+          error.code = "own";
+          throw error;
         }
-        throw e;
+        try {
+          const body = await tokenRequest({
+            grant_type: "refresh_token",
+            refresh_token: current.refresh_token
+          });
+          write(TOKENS_KEY, {
+            access_token: body.access_token,
+            // rotation: Salesforce sends a new refresh token and retires the old one
+            refresh_token: body.refresh_token || current.refresh_token,
+            instance_url: body.instance_url || current.instance_url
+          });
+          return;
+        } catch (e) {
+          if (isTemporary(e)) {
+            // a network or server hiccup says nothing about the login: keep it
+            throw e;
+          }
+          // Another window of the app may have renewed the login while this one was asking
+          // (they share the saved login). Then the refusal was for the old key only: go on
+          // with the newer one instead of signing the user out of both windows.
+          const latest = tokens();
+          if (
+            latest &&
+            latest.refresh_token &&
+            latest.refresh_token !== current.refresh_token
+          ) {
+            current = latest;
+            continue;
+          }
+          // A real refusal by Salesforce (deactivated user, revoked or expired login, access
+          // taken away) ends the login on this device.
+          forgetLogin();
+          throw e;
+        }
       }
     })().finally(() => {
       refreshing = null;

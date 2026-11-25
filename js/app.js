@@ -13,7 +13,8 @@ import {
   data,
   change,
   downloadFile,
-  SignedOutError
+  SignedOutError,
+  SIGNED_OUT_EVENT
 } from "./api.js";
 
 const root = document.getElementById("app");
@@ -145,7 +146,7 @@ async function refreshWaiting() {
   try {
     setWaiting((await get("approvals")).length);
   } catch (e) {
-    // offline or signed out: the next screen will say so
+    // offline: the next screen will say so. A refused login shows the sign-in screen by itself.
   }
 }
 
@@ -309,12 +310,35 @@ function field(label, value) {
     : `<p class="kv"><span>${esc(label)}</span><b>${esc(value)}</b></p>`;
 }
 
+/**
+ * Salesforce refused this device's login (user deactivated, login revoked or expired): nothing
+ * of the user's data stays on the screen, whatever was open, and the sign-in screen says why.
+ */
+function showSignedOut(message) {
+  renderToken++; // a screen still loading must not draw over the sign-in screen
+  me = null;
+  teamInfo = null;
+  setWaiting(0);
+  if (scrollWatcher) {
+    scrollWatcher.disconnect();
+    scrollWatcher = null;
+  }
+  closeSheet();
+  const bar = document.getElementById("offer-bar");
+  if (bar) {
+    bar.remove();
+  }
+  document.body.classList.remove("has-offer-bar");
+  renderLogin(message);
+}
+
+window.addEventListener(SIGNED_OUT_EVENT, (event) =>
+  showSignedOut(event.detail)
+);
+
 function handleError(error, target) {
   if (error instanceof SignedOutError) {
-    me = null;
-    teamInfo = null;
-    setWaiting(0);
-    renderLogin(error.message);
+    showSignedOut(error.message);
     return;
   }
   (target || document.getElementById("screen")).innerHTML = errorBox(
@@ -6570,8 +6594,12 @@ async function render() {
       await renderClientNew(token, params);
     } else if (path === "me") {
       renderMe();
+      // these two screens load nothing themselves: ask Salesforce anyway, so a user who was
+      // deactivated is signed out on this step too
+      refreshWaiting();
     } else if (path === "feedback") {
       renderFeedback();
+      refreshWaiting();
     } else {
       await renderHome(token);
     }
@@ -6598,7 +6626,9 @@ async function start() {
 document.addEventListener("visibilitychange", checkForUpdate);
 setInterval(checkForUpdate, 15 * 60 * 1000);
 document.addEventListener("visibilitychange", refreshWaiting);
-setInterval(refreshWaiting, 5 * 60 * 1000);
+// Every minute while the app is on screen: keeps the approvals badge fresh, and is also what
+// signs out a user who was deactivated while a screen was simply left open.
+setInterval(refreshWaiting, 60 * 1000);
 
 if ("serviceWorker" in navigator && location.protocol === "https:") {
   navigator.serviceWorker.register("sw.js").catch(() => {});
