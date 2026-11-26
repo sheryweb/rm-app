@@ -2065,6 +2065,8 @@ function dealRow(deal) {
 
 const DEALS_VIEW_KEY = "rmapp.dealsView";
 const LEADS_VIEW_KEY = "rmapp.leadsView";
+const UNITS_VIEW_KEY = "rmapp.unitsView";
+const CLIENTS_VIEW_KEY = "rmapp.clientsView";
 const LIST_VIEWS = [
   { key: "list", label: "List", icon: "M4 6h16M4 12h16M4 18h16" },
   { key: "board", label: "Board", icon: "M5 4v16M12 4v11M19 4v14" }
@@ -2083,7 +2085,10 @@ function dealsView() {
   return savedView(DEALS_VIEW_KEY);
 }
 
-/** The Mine / Team chips (directors only) and the List / Board switch, on one line. */
+/**
+ * The Mine / Team chips (directors only) and the List / Board switch, on one line. A screen
+ * with no team view (units, clients) passes no scope and gets the switch alone.
+ */
 function dealsTop(scope, view) {
   const options = LIST_VIEWS.map(
     (v) => `
@@ -2092,7 +2097,7 @@ function dealsTop(scope, view) {
         <span>${v.label}</span>
       </button>`
   ).join("");
-  return `<div class="list-top">${scopeChips(scope)}
+  return `<div class="list-top">${scope ? scopeChips(scope) : ""}
     <div class="view-switch" role="group" aria-label="View">${options}</div></div>`;
 }
 
@@ -2135,6 +2140,23 @@ function boardCard(deal) {
     </article>`;
 }
 
+function boardCountText(column) {
+  return (column.count || 0) + (column.countCapped ? "+" : "");
+}
+
+/** The chips above a board: one per column, with its count. */
+function boardJump(columns) {
+  return `<div class="board-jump">${chips(
+    columns.map((c) => ({
+      key: c.key,
+      label: c.label,
+      count: boardCountText(c)
+    })),
+    columns.length ? columns[0].key : "",
+    "col"
+  )}</div>`;
+}
+
 function boardColumn(column, options) {
   const o = options || {};
   const card = o.card || boardCard;
@@ -2143,7 +2165,7 @@ function boardColumn(column, options) {
     <section class="board-col ${esc(o.tone ? o.tone(column) : "board-" + column.key)}" data-col="${esc(column.key)}">
       <header class="board-head">
         <h3>${esc(column.label)}</h3>
-        <span class="board-count">${column.count || 0}</span>
+        <span class="board-count">${boardCountText(column)}</span>
       </header>
       <div class="board-body">
         ${rows.map(card).join("")}
@@ -2159,7 +2181,8 @@ function sizeBoard() {
   if (!board) {
     return;
   }
-  const tabbar = document.querySelector(".tabbar");
+  const offerBar = document.getElementById("offer-bar");
+  const tabbar = offerBar || document.querySelector(".tabbar");
   const bottom = tabbar
     ? tabbar.getBoundingClientRect().top
     : window.innerHeight;
@@ -2525,7 +2548,7 @@ const UNIT_STATUSES = [
   { key: "all", label: "All" }
 ];
 
-function unitRow(unit) {
+function unitRow(unit, onBoard) {
   const facts = [
     unit.type,
     unit.bedrooms == null
@@ -2557,17 +2580,22 @@ function unitRow(unit) {
       )
     : "";
   return `
-    <article class="row${offerable ? " is-selectable" : ""}${offerSelection.has(unit.id) ? " is-selected" : ""}"${
+    <article class="row${onBoard ? " board-card" : ""}${offerable ? " is-selectable" : ""}${offerSelection.has(unit.id) ? " is-selected" : ""}"${
       offerable ? ` data-unit="${picked}"` : ""
     }>
       <div class="row-head">
         <h4>${offerable ? `<span class="check" aria-hidden="true"></span>` : ""}${esc(unit.title)}</h4>
-        <span class="pill status-${esc(unit.status)}">${esc(unit.statusLabel)}</span>
+        ${onBoard ? "" : `<span class="pill status-${esc(unit.status)}">${esc(unit.statusLabel)}</span>`}
       </div>
       <p class="muted">${esc(place.join(" · "))}</p>
       <p class="muted">${esc(facts.join(" · "))}</p>
       <p class="price">${esc(money(unit.price, unit.currencyCode))}</p>
     </article>`;
+}
+
+/** A unit on the board: the column tells the status, so the card does not repeat it. */
+function unitCard(unit) {
+  return unitRow(unit, true);
 }
 
 // ------------------------------------------------------------- sales offers
@@ -2647,6 +2675,7 @@ function renderOfferBar() {
     if (bar) {
       bar.remove();
     }
+    sizeBoard();
     return;
   }
   if (!bar) {
@@ -2679,6 +2708,7 @@ function renderOfferBar() {
     .getElementById("offer-clear")
     .addEventListener("click", clearOfferSelection);
   document.getElementById("offer-go").addEventListener("click", openOfferSheet);
+  sizeBoard();
 }
 
 function closeSheet() {
@@ -2893,11 +2923,23 @@ async function renderUnits(token, params) {
   if (!unitStatuses.some((option) => option.key === filters.status)) {
     filters.status = "available";
   }
+  const asBoard = savedView(UNITS_VIEW_KEY) === "board";
   shell("Units", loading(), "units");
-  const projects = await get("projects");
+  const [projects, board] = await Promise.all([
+    get("projects"),
+    asBoard
+      ? get("units/board", {
+          projectId: filters.projectId,
+          bedrooms: filters.bedrooms,
+          search: filters.search,
+          pageSize: BOARD_PAGE
+        })
+      : null
+  ]);
   if (token !== renderToken) {
     return;
   }
+  const columns = (board && board.columns) || [];
   const projectOptions = [`<option value="">All projects</option>`]
     .concat(
       projects.map(
@@ -2921,22 +2963,42 @@ async function renderUnits(token, params) {
     )
     .join("");
 
-  document.getElementById("screen").innerHTML = `
+  const screen = document.getElementById("screen");
+  screen.classList.toggle("screen-wide", asBoard);
+  screen.innerHTML = `
+    ${dealsTop(null, asBoard ? "board" : "list")}
     <select class="select" id="project">${projectOptions}</select>
-    ${chips(unitStatuses, filters.status, "status")}
+    ${asBoard ? "" : chips(unitStatuses, filters.status, "status")}
     <div class="filter-row">
       <select class="select" id="bedrooms">${bedroomOptions}</select>
       <input class="search" id="search" type="search" placeholder="Search unit or building" value="${esc(filters.search)}" />
     </div>
     <p class="hint">Tap available units to select them for a sales offer.</p>
-    <div class="list" id="list"></div>`;
+    ${
+      asBoard
+        ? `${boardJump(columns)}
+    <div class="board" id="board">${columns
+      .map((c) =>
+        boardColumn(c, {
+          card: unitCard,
+          tone: (column) => "unit-col-" + column.key,
+          empty: "No units here"
+        })
+      )
+      .join("")}</div>`
+        : `<div class="list" id="list"></div>`
+    }`;
+  wireViewSwitch(UNITS_VIEW_KEY);
 
-  document.getElementById("list").addEventListener("click", (event) => {
-    const rowEl = event.target.closest(".row.is-selectable");
-    if (rowEl) {
-      toggleOfferUnit(JSON.parse(rowEl.dataset.unit), rowEl);
-    }
-  });
+  // the same tap selects a unit for a sales offer, on a list row or on a board card
+  document
+    .getElementById(asBoard ? "board" : "list")
+    .addEventListener("click", (event) => {
+      const rowEl = event.target.closest(".row.is-selectable");
+      if (rowEl) {
+        toggleOfferUnit(JSON.parse(rowEl.dataset.unit), rowEl);
+      }
+    });
   renderOfferBar();
 
   const apply = (change) => go("units", { ...filters, ...change });
@@ -2958,10 +3020,27 @@ async function renderUnits(token, params) {
         apply({ status: button.dataset.status })
       )
     );
+  if (asBoard) {
+    sizeBoard();
+    wireBoard(
+      document.getElementById("board"),
+      columns,
+      token,
+      unitCard,
+      (key, offset) =>
+        get("units", {
+          ...filters,
+          status: key,
+          pageSize: BOARD_PAGE,
+          offset
+        })
+    );
+    return;
+  }
   infiniteList(
     document.getElementById("list"),
     (offset) => get("units", { ...filters, pageSize: PAGE_SIZE, offset }),
-    unitRow,
+    (unit) => unitRow(unit),
     "No units match these filters.",
     token
   );
@@ -4743,31 +4822,83 @@ const CLIENT_KINDS = [
   { key: "company", label: "Companies" }
 ];
 
-function clientRow(client) {
+function clientRow(client, onBoard) {
   return `
-    <article class="row is-link" data-open="#/client?id=${esc(client.id)}">
+    <article class="row is-link${onBoard ? " board-card" : ""}" data-open="#/client?id=${esc(client.id)}">
       <div class="row-head">
         <h4>${esc(client.name)}</h4>
-        <span class="pill ${client.kind === "company" ? "pill-warn" : "pill-info"}">${
-          client.kind === "company" ? "Company" : "Individual"
-        }</span>
+        ${
+          onBoard
+            ? ""
+            : `<span class="pill ${client.kind === "company" ? "pill-warn" : "pill-info"}">${
+                client.kind === "company" ? "Company" : "Individual"
+              }</span>`
+        }
       </div>
       <p class="muted">${esc([client.mobile, client.email].filter(Boolean).join(" · "))}</p>
       <p class="muted">${esc([client.country, client.ownerName ? "Owner: " + client.ownerName : ""].filter(Boolean).join(" · "))}</p>
     </article>`;
 }
 
+/** A client on the board: the column tells Individual or Company. */
+function clientCard(client) {
+  return clientRow(client, true);
+}
+
+/** The clients as a board: Individuals and Companies side by side. */
+async function renderClientsBoard(token, params) {
+  const search = params.get("search") || "";
+  shell("Clients", loading(), "clients");
+  const board = await get("clients/board", { search, pageSize: BOARD_PAGE });
+  if (token !== renderToken) {
+    return;
+  }
+  const columns = board.columns || [];
+  const screen = document.getElementById("screen");
+  screen.classList.add("screen-wide");
+  screen.innerHTML = `
+    ${dealsTop(null, "board")}
+    <input class="search" id="search" type="search" placeholder="Search name, phone, email, passport" value="${esc(search)}" />
+    ${boardJump(columns)}
+    <div class="board" id="board">${columns
+      .map((c) =>
+        boardColumn(c, {
+          card: clientCard,
+          tone: (column) => "client-col-" + column.key,
+          empty: search ? "No clients match this search" : "No clients here"
+        })
+      )
+      .join("")}</div>
+    <a class="fab" href="#/client-new" aria-label="Add client">+ Add Client</a>`;
+  wireViewSwitch(CLIENTS_VIEW_KEY);
+  document
+    .getElementById("search")
+    .addEventListener("change", (event) =>
+      go("clients", { search: event.target.value.trim() })
+    );
+  const boardEl = document.getElementById("board");
+  openOnTap(boardEl);
+  sizeBoard();
+  wireBoard(boardEl, columns, token, clientCard, (key, offset) =>
+    get("clients", { kind: key, search, pageSize: BOARD_PAGE, offset })
+  );
+}
+
 function renderClients(token, params) {
+  if (savedView(CLIENTS_VIEW_KEY) === "board") {
+    return renderClientsBoard(token, params);
+  }
   const kind = params.get("kind") || "all";
   const search = params.get("search") || "";
   shell(
     "Clients",
-    `${chips(CLIENT_KINDS, kind, "kind")}
+    `${dealsTop(null, "list")}${chips(CLIENT_KINDS, kind, "kind")}
      <input class="search" id="search" type="search" placeholder="Search name, phone, email, passport" value="${esc(search)}" />
      <div class="list" id="list"></div>
      <a class="fab" href="#/client-new" aria-label="Add client">+ Add Client</a>`,
     "clients"
   );
+  wireViewSwitch(CLIENTS_VIEW_KEY);
   root
     .querySelectorAll("[data-kind]")
     .forEach((button) =>
@@ -4784,7 +4915,7 @@ function renderClients(token, params) {
   infiniteList(
     document.getElementById("list"),
     (offset) => get("clients", { kind, search, pageSize: PAGE_SIZE, offset }),
-    clientRow,
+    (client) => clientRow(client),
     search
       ? "No clients match this search."
       : "No clients yet. Tap Add Client to create one.",

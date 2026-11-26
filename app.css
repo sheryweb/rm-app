@@ -2035,6 +2035,36 @@ a.button-outline {
   min-height: 24px;
 }
 
+/* ---------- units and clients: board columns ---------- */
+
+.unit-col-available {
+  --col: var(--ok);
+}
+
+.unit-col-blocked {
+  --col: var(--warn);
+}
+
+.unit-col-booked {
+  --col: var(--info);
+}
+
+.unit-col-reserved {
+  --col: var(--navy-soft);
+}
+
+.unit-col-sold {
+  --col: #8a93a6;
+}
+
+.client-col-client {
+  --col: var(--info);
+}
+
+.client-col-company {
+  --col: var(--warn);
+}
+
 /* ---------- leads: board columns, Update Status ---------- */
 
 .lead-col-new,
