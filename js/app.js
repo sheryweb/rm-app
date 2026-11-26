@@ -813,36 +813,216 @@ const LEAD_BUCKETS = [
   { key: "closed", label: "Closed" }
 ];
 
-function leadRow(lead) {
-  const flags = [
+function leadFlags(lead) {
+  return [
     lead.waiting ? `<span class="pill pill-warn">Waiting</span>` : "",
     lead.hasOverdueTask
       ? `<span class="pill pill-urgent">Overdue task</span>`
       : ""
-  ].join("");
-  const contact = [
-    lead.phone
-      ? `<a class="action" href="tel:${esc(lead.phone)}">Call</a>`
-      : "",
-    lead.phone
-      ? `<a class="action" href="https://wa.me/${esc(String(lead.phone).replace(/[^0-9]/g, ""))}" target="_blank" rel="noopener">WhatsApp</a>`
-      : "",
-    lead.email
-      ? `<a class="action" href="mailto:${esc(lead.email)}">Email</a>`
-      : ""
-  ].join("");
+  ].join(" ");
+}
+
+/** Call, WhatsApp, Email and Update Status: the same on a list row and on a board card. */
+function leadActions(lead) {
   return `
-    <article class="row">
+    <div class="actions lead-actions">
+      ${lead.phone ? `<a class="action" href="tel:${esc(lead.phone)}">Call</a>` : ""}
+      ${
+        lead.phone
+          ? `<a class="action" href="https://wa.me/${esc(String(lead.phone).replace(/[^0-9]/g, ""))}" target="_blank" rel="noopener">WhatsApp</a>`
+          : ""
+      }
+      ${lead.email ? `<a class="action" href="mailto:${esc(lead.email)}">Email</a>` : ""}
+      <button type="button" class="action action-status" data-lead-status="${esc(lead.id)}" data-lead-name="${esc(lead.name)}">Update Status</button>
+    </div>`;
+}
+
+function leadRow(lead) {
+  return `
+    <article class="row" data-lead-row="${esc(lead.id)}">
       <div class="row-head">
         <h4>${esc(lead.name)}</h4>
         <span class="pill${lead.closed ? " pill-muted" : ""}">${esc(lead.status)}</span>
       </div>
       <p class="muted">${esc([lead.project, lead.source].filter(Boolean).join(" · "))}</p>
-      <p class="muted">Assigned ${esc(shortDate(lead.assignedDate))} · ${days(lead.daysSinceAssigned)} ago ${flags}</p>
+      <p class="muted">Assigned ${esc(shortDate(lead.assignedDate))} · ${days(lead.daysSinceAssigned)} ago ${leadFlags(lead)}</p>
       ${lead.ownerName ? `<p class="muted">RM: <b>${esc(lead.ownerName)}</b></p>` : ""}
       ${lead.nextAction ? `<p class="next">${esc(lead.nextAction)}</p>` : ""}
-      ${contact ? `<div class="actions">${contact}</div>` : ""}
+      ${leadActions(lead)}
     </article>`;
+}
+
+/** A lead on the board: the column tells the status, so the card does not repeat it. */
+function leadCard(lead) {
+  const flags = leadFlags(lead);
+  return `
+    <article class="row board-card" data-lead-row="${esc(lead.id)}">
+      <h4>${esc(lead.name)}</h4>
+      <p class="muted">${esc([lead.project, lead.source].filter(Boolean).join(" · "))}</p>
+      <p class="muted">Assigned ${esc(shortDate(lead.assignedDate))} · ${days(lead.daysSinceAssigned)} ago</p>
+      ${flags.trim() ? `<p class="board-flags">${flags}</p>` : ""}
+      ${lead.ownerName ? `<p class="muted">RM: <b>${esc(lead.ownerName)}</b></p>` : ""}
+      ${lead.nextAction ? `<p class="next">${esc(lead.nextAction)}</p>` : ""}
+      ${leadActions(lead)}
+    </article>`;
+}
+
+// ------------------------------------------------------- lead status change
+// The RM changes a lead's status the way the Salesforce lead page does: the statuses offered
+// are the ones Salesforce gives that kind of lead, and the save goes through Salesforce's own
+// record service with the RM's login, so its permissions, rules and automation all apply.
+// A status that means "converted" (Qualified) is not offered: converting a lead creates the
+// client, and that is done in Salesforce.
+
+function leadStatusChoices(recordTypeId) {
+  return cached("leadStatus:" + recordTypeId, () =>
+    data("ui-api/object-info/Lead/picklist-values/" + recordTypeId + "/Status")
+  );
+}
+
+function openLeadStatusSheet(leadId, leadName, onSaved) {
+  closeSheet();
+  const backdrop = document.createElement("div");
+  backdrop.className = "sheet-backdrop";
+  backdrop.innerHTML = `<div class="sheet" role="dialog" aria-modal="true"><div id="sheet-body">${loading()}</div></div>`;
+  document.body.appendChild(backdrop);
+  const body = backdrop.querySelector("#sheet-body");
+  let busy = false;
+  backdrop.addEventListener("click", (event) => {
+    if (event.target === backdrop && !busy) {
+      closeSheet();
+    }
+  });
+  const closeOnly = (message) => {
+    body.innerHTML = `${errorBox(message)}<button class="button-secondary" id="sheet-close">Close</button>`;
+    body.querySelector("#sheet-close").addEventListener("click", closeSheet);
+  };
+
+  (async () => {
+    let record;
+    let list;
+    try {
+      record = await data(
+        "ui-api/records/" + leadId + "?fields=Lead.Status,Lead.Name"
+      );
+      list = await leadStatusChoices(
+        record.recordTypeId || "012000000000000AAA"
+      );
+    } catch (error) {
+      if (error instanceof SignedOutError) {
+        closeSheet();
+        showSignedOut(error.message);
+        return;
+      }
+      closeOnly(error.message);
+      return;
+    }
+    if (!backdrop.isConnected) {
+      return;
+    }
+    const current = record.fields.Status.value || "";
+    const values = list.values || [];
+    const isConverting = (v) => Boolean(v.attributes && v.attributes.converted);
+    const choices = values.filter((v) => !isConverting(v));
+    const converting = values.filter(isConverting).map((v) => v.label);
+    if (!choices.some((v) => v.value !== current)) {
+      closeOnly("There is no other status to choose for this lead.");
+      return;
+    }
+    body.innerHTML = `
+      <h2>Update Lead Status</h2>
+      <p class="muted">${esc(leadName || record.fields.Name.value || "")}${current ? ` · now <b>${esc(current)}</b>` : ""}</p>
+      <div class="status-choices" role="radiogroup" aria-label="Lead status">
+        ${choices
+          .map(
+            (v) => `
+          <button type="button" class="status-choice${v.value === current ? " is-current" : ""}" role="radio" aria-checked="false" data-value="${esc(v.value)}"${v.value === current ? " disabled" : ""}>
+            <span>${esc(v.label)}</span>${v.value === current ? `<small>Current</small>` : ""}
+          </button>`
+          )
+          .join("")}
+      </div>
+      ${
+        converting.length
+          ? `<p class="muted status-note">${esc(converting.join(" and "))} is set when the lead is converted in Salesforce.</p>`
+          : ""
+      }
+      <div id="status-error"></div>
+      <button class="button-primary" id="status-save" disabled>Save</button>
+      <button class="button-secondary" id="sheet-close">Cancel</button>`;
+    const save = body.querySelector("#status-save");
+    let picked = "";
+    body.querySelectorAll(".status-choice").forEach((button) =>
+      button.addEventListener("click", () => {
+        picked = button.dataset.value;
+        body.querySelectorAll(".status-choice").forEach((other) => {
+          other.classList.toggle("is-picked", other === button);
+          other.setAttribute("aria-checked", String(other === button));
+        });
+        save.disabled = false;
+        save.textContent = "Save as " + picked;
+      })
+    );
+    body.querySelector("#sheet-close").addEventListener("click", () => {
+      if (!busy) {
+        closeSheet();
+      }
+    });
+    save.addEventListener("click", async () => {
+      if (busy || !picked) {
+        return;
+      }
+      busy = true;
+      save.disabled = true;
+      save.textContent = "Saving…";
+      body.querySelector("#status-error").innerHTML = "";
+      try {
+        await change("PATCH", "ui-api/records/" + leadId, {
+          fields: { Status: picked }
+        });
+      } catch (error) {
+        busy = false;
+        if (error instanceof SignedOutError) {
+          closeSheet();
+          showSignedOut(error.message);
+          return;
+        }
+        save.disabled = false;
+        save.textContent = "Save as " + picked;
+        body.querySelector("#status-error").innerHTML = errorBox(error.message);
+        return;
+      }
+      closeSheet();
+      toast((leadName ? leadName + ": " : "") + "status is now " + picked);
+      onSaved(picked);
+    });
+  })();
+}
+
+/** The Update Status buttons inside `container` open the sheet; `onSaved(rowEl, status)`. */
+function wireLeadStatus(container, onSaved) {
+  container.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-lead-status]");
+    if (!button) {
+      return;
+    }
+    const rowEl = button.closest("[data-lead-row]");
+    openLeadStatusSheet(
+      button.dataset.leadStatus,
+      button.dataset.leadName,
+      (status) => onSaved(rowEl, status)
+    );
+  });
+}
+
+/** Shows the new status on a lead's row; what was said about the old status goes away. */
+function showLeadStatus(rowEl, status) {
+  const pill = rowEl.querySelector(".row-head .pill");
+  if (pill) {
+    pill.textContent = status;
+    pill.classList.remove("pill-muted");
+  }
+  rowEl.querySelectorAll(".next, .pill-warn").forEach((el) => el.remove());
 }
 
 // ---------------------------------------------------------------- team lists
@@ -922,7 +1102,7 @@ async function renderTeamLeads(token, params) {
     return;
   }
   document.getElementById("screen").innerHTML = `
-    ${scopeChips("team")}
+    ${dealsTop("team", "list")}
     ${memberSelect(team, owner)}
     <select class="select" id="team-status" aria-label="Lead status">
       <option value="">All statuses</option>
@@ -932,6 +1112,8 @@ async function renderTeamLeads(token, params) {
     <div class="list" id="list"></div>`;
   const current = { scope: "team", owner, status, search };
   wireTeamList("leads", current);
+  wireLeadsViewSwitch(params);
+  wireLeadStatus(document.getElementById("list"), showLeadStatus);
   document
     .getElementById("team-status")
     .addEventListener("change", (event) =>
@@ -978,7 +1160,7 @@ async function renderTeamDeals(token, params) {
     <div class="list" id="list"></div>`;
   const current = { scope: "team", owner, step, search };
   wireTeamList("deals", current);
-  wireViewSwitch();
+  wireViewSwitch(DEALS_VIEW_KEY);
   root
     .querySelectorAll("[data-step]")
     .forEach((button) =>
@@ -1799,6 +1981,9 @@ async function renderSalesActivity(token, params) {
 }
 
 function renderLeads(token, params) {
+  if (leadsAsBoard(params)) {
+    return renderLeadsBoard(token, params);
+  }
   if (isTeamScope(params)) {
     return renderTeamLeads(token, params);
   }
@@ -1806,12 +1991,14 @@ function renderLeads(token, params) {
   const search = params.get("search") || "";
   shell(
     "My Leads",
-    `${scopeChips("mine")}${chips(LEAD_BUCKETS, bucket, "bucket")}
+    `${dealsTop("mine", "list")}${chips(LEAD_BUCKETS, bucket, "bucket")}
      <input class="search" id="search" type="search" placeholder="Search name, phone or email" value="${esc(search)}" />
      <div class="list" id="list"></div>`,
     "leads"
   );
   wireTeamList("leads", null);
+  wireLeadsViewSwitch(params);
+  wireLeadStatus(document.getElementById("list"), showLeadStatus);
   root
     .querySelectorAll("[data-bucket]")
     .forEach((button) =>
@@ -1871,28 +2058,34 @@ function dealRow(deal) {
     </article>`;
 }
 
-// ------------------------------------------------- deals: list or board view
-// Each RM picks how the deals screens look, a list or a board (one column per step), and
-// can change it at any time. The choice is kept on the device, so it survives signing out.
+// ------------------------------------------- list or board view (deals, leads)
+// Each RM picks how the deals and the leads screens look, a list or a board (one column per
+// step or status), and can change it at any time. The choice is kept on the device, one per
+// screen, so it survives signing out.
 
 const DEALS_VIEW_KEY = "rmapp.dealsView";
-const DEAL_VIEWS = [
+const LEADS_VIEW_KEY = "rmapp.leadsView";
+const LIST_VIEWS = [
   { key: "list", label: "List", icon: "M4 6h16M4 12h16M4 18h16" },
   { key: "board", label: "Board", icon: "M5 4v16M12 4v11M19 4v14" }
 ];
 const BOARD_PAGE = 15;
 
-function dealsView() {
+function savedView(key) {
   try {
-    return localStorage.getItem(DEALS_VIEW_KEY) === "board" ? "board" : "list";
+    return localStorage.getItem(key) === "board" ? "board" : "list";
   } catch (e) {
     return "list";
   }
 }
 
+function dealsView() {
+  return savedView(DEALS_VIEW_KEY);
+}
+
 /** The Mine / Team chips (directors only) and the List / Board switch, on one line. */
 function dealsTop(scope, view) {
-  const options = DEAL_VIEWS.map(
+  const options = LIST_VIEWS.map(
     (v) => `
       <button class="view-option${v.key === view ? " is-active" : ""}" data-view="${v.key}" aria-pressed="${v.key === view}">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="${v.icon}"/></svg>
@@ -1903,15 +2096,20 @@ function dealsTop(scope, view) {
     <div class="view-switch" role="group" aria-label="View">${options}</div></div>`;
 }
 
-function wireViewSwitch() {
+/** Wires the List / Board switch; `afterPick` (optional) decides what the screen does next. */
+function wireViewSwitch(key, afterPick) {
   root.querySelectorAll("[data-view]").forEach((button) =>
     button.addEventListener("click", () => {
       try {
-        localStorage.setItem(DEALS_VIEW_KEY, button.dataset.view);
+        localStorage.setItem(key || DEALS_VIEW_KEY, button.dataset.view);
       } catch (e) {
         // storage is blocked: the view cannot be remembered, the list stays
       }
-      render();
+      if (afterPick) {
+        afterPick(button.dataset.view);
+      } else {
+        render();
+      }
     })
   );
 }
@@ -1937,17 +2135,19 @@ function boardCard(deal) {
     </article>`;
 }
 
-function boardColumn(column) {
+function boardColumn(column, options) {
+  const o = options || {};
+  const card = o.card || boardCard;
   const rows = column.rows || [];
   return `
-    <section class="board-col board-${esc(column.key)}" data-col="${esc(column.key)}">
+    <section class="board-col ${esc(o.tone ? o.tone(column) : "board-" + column.key)}" data-col="${esc(column.key)}">
       <header class="board-head">
         <h3>${esc(column.label)}</h3>
         <span class="board-count">${column.count || 0}</span>
       </header>
       <div class="board-body">
-        ${rows.map(boardCard).join("")}
-        ${rows.length ? "" : `<p class="board-empty">No deals in this step</p>`}
+        ${rows.map(card).join("")}
+        ${rows.length ? "" : `<p class="board-empty">${esc(o.empty || "No deals in this step")}</p>`}
         ${column.hasMore ? `<div class="sentinel"></div>` : ""}
       </div>
     </section>`;
@@ -1968,57 +2168,14 @@ function sizeBoard() {
 }
 window.addEventListener("resize", sizeBoard);
 
-/** My Deals or Team Deals as a board. Only for looking: a deal moves by its real steps. */
-async function renderDealsBoard(token, params) {
-  const team = isTeamScope(params);
-  const owner = team ? params.get("owner") || "" : "";
-  const step = params.get("step") || "";
-  const search = params.get("search") || "";
-  shell(team ? "Team Deals" : "My Deals", loading(), "deals");
-  const [teamInfoNow, board] = await Promise.all([
-    team ? loadTeam() : null,
-    team
-      ? get("team/deals/board", {
-          ownerId: owner,
-          search,
-          pageSize: BOARD_PAGE
-        })
-      : get("deals/board", { search, pageSize: BOARD_PAGE })
-  ]);
-  if (token !== renderToken) {
-    return;
-  }
-  const columns = board.columns || [];
-  const screen = document.getElementById("screen");
-  screen.classList.add("screen-wide");
-  screen.innerHTML = `
-    ${dealsTop(team ? "team" : "mine", "board")}
-    ${team ? memberSelect(teamInfoNow, owner) : ""}
-    <input class="search" id="search" type="search" placeholder="Search client or unit" value="${esc(search)}" />
-    <div class="board-jump">${chips(
-      columns.map((c) => ({ key: c.key, label: c.label, count: c.count || 0 })),
-      columns.length ? columns[0].key : "",
-      "col"
-    )}</div>
-    <div class="board" id="board">${columns.map(boardColumn).join("")}</div>`;
-
-  // the list's step is carried along, so switching back to the list lands where it was
-  const current = { search };
-  if (team) {
-    current.scope = "team";
-    current.owner = owner;
-  }
-  if (step) {
-    current.step = step;
-  }
-  wireTeamList("deals", current);
-  wireViewSwitch();
-
-  const boardEl = document.getElementById("board");
-  openOnTap(boardEl);
-  sizeBoard();
-
-  // the chips above the board jump to a column and show which one is in front
+/**
+ * Makes a drawn board work: the chips above it jump to a column and show which one is in
+ * front, and each column loads its next page when its end comes into view (`loadPage(key,
+ * offset)` answers one more page of a column). Returns the column elements, the chips and
+ * `moved(fromKey, toKey)`: called when a card was put into another column on the screen, so
+ * the paging keeps counting from the right place.
+ */
+function wireBoard(boardEl, columns, token, card, loadPage) {
   const jumps = Array.from(root.querySelectorAll("[data-col].chip"));
   const columnEls = Array.from(boardEl.querySelectorAll(".board-col"));
   jumps.forEach((chip) =>
@@ -2074,21 +2231,13 @@ async function renderDealsBoard(token, params) {
     busy.add(key);
     sentinel.innerHTML = loading();
     try {
-      const query = {
-        step: key,
-        search,
-        pageSize: BOARD_PAGE,
-        offset: loaded.get(key)
-      };
-      const page = team
-        ? await get("team/deals", { ...query, ownerId: owner })
-        : await get("deals", query);
+      const page = await loadPage(key, loaded.get(key));
       if (token !== renderToken) {
         return;
       }
       const rows = page.rows || [];
       sentinel.innerHTML = "";
-      sentinel.insertAdjacentHTML("beforebegin", rows.map(boardCard).join(""));
+      sentinel.insertAdjacentHTML("beforebegin", rows.map(card).join(""));
       loaded.set(key, loaded.get(key) + rows.length);
       scrollWatcher.unobserve(sentinel);
       if (page.hasMore && rows.length) {
@@ -2114,6 +2263,213 @@ async function renderDealsBoard(token, params) {
   boardEl
     .querySelectorAll(".sentinel")
     .forEach((sentinel) => scrollWatcher.observe(sentinel));
+
+  return {
+    columnEls,
+    jumps,
+    moved(fromKey, toKey) {
+      loaded.set(fromKey, Math.max(0, (loaded.get(fromKey) || 0) - 1));
+      loaded.set(toKey, (loaded.get(toKey) || 0) + 1);
+    }
+  };
+}
+
+/** My Deals or Team Deals as a board. Only for looking: a deal moves by its real steps. */
+async function renderDealsBoard(token, params) {
+  const team = isTeamScope(params);
+  const owner = team ? params.get("owner") || "" : "";
+  const step = params.get("step") || "";
+  const search = params.get("search") || "";
+  shell(team ? "Team Deals" : "My Deals", loading(), "deals");
+  const [teamInfoNow, board] = await Promise.all([
+    team ? loadTeam() : null,
+    team
+      ? get("team/deals/board", {
+          ownerId: owner,
+          search,
+          pageSize: BOARD_PAGE
+        })
+      : get("deals/board", { search, pageSize: BOARD_PAGE })
+  ]);
+  if (token !== renderToken) {
+    return;
+  }
+  const columns = board.columns || [];
+  const screen = document.getElementById("screen");
+  screen.classList.add("screen-wide");
+  screen.innerHTML = `
+    ${dealsTop(team ? "team" : "mine", "board")}
+    ${team ? memberSelect(teamInfoNow, owner) : ""}
+    <input class="search" id="search" type="search" placeholder="Search client or unit" value="${esc(search)}" />
+    <div class="board-jump">${chips(
+      columns.map((c) => ({ key: c.key, label: c.label, count: c.count || 0 })),
+      columns.length ? columns[0].key : "",
+      "col"
+    )}</div>
+    <div class="board" id="board">${columns.map((c) => boardColumn(c)).join("")}</div>`;
+
+  // the list's step is carried along, so switching back to the list lands where it was
+  const current = { search };
+  if (team) {
+    current.scope = "team";
+    current.owner = owner;
+  }
+  if (step) {
+    current.step = step;
+  }
+  wireTeamList("deals", current);
+  wireViewSwitch(DEALS_VIEW_KEY);
+
+  const boardEl = document.getElementById("board");
+  openOnTap(boardEl);
+  sizeBoard();
+  wireBoard(boardEl, columns, token, boardCard, (key, offset) => {
+    const query = { step: key, search, pageSize: BOARD_PAGE, offset };
+    return team
+      ? get("team/deals", { ...query, ownerId: owner })
+      : get("deals", query);
+  });
+}
+
+// ------------------------------------------------------------- leads: board
+// The same board as the deals have, one column per Lead Status. A lead moves to another
+// column when its status is changed with Update Status on its card (no dragging).
+
+function leadTone(column) {
+  return (
+    "lead-col-" +
+    String(column.key)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-") +
+    (column.closed ? " lead-col-closed" : "")
+  );
+}
+
+/**
+ * Leads show as a board when the RM chose that view. A link that asks for one particular
+ * list (a tile of the home screen, a status filter) is still answered with that list.
+ */
+function leadsAsBoard(params) {
+  const bucket = params.get("bucket") || "";
+  return (
+    savedView(LEADS_VIEW_KEY) === "board" &&
+    (!bucket || bucket === "open") &&
+    !params.get("status")
+  );
+}
+
+/** The List / Board switch of the leads screens: the board has no bucket or status filter. */
+function wireLeadsViewSwitch(params) {
+  wireViewSwitch(LEADS_VIEW_KEY, () => {
+    const next = {};
+    if (isTeamScope(params)) {
+      next.scope = "team";
+      if (params.get("owner")) {
+        next.owner = params.get("owner");
+      }
+    }
+    if (params.get("search")) {
+      next.search = params.get("search");
+    }
+    const before = location.hash;
+    go("leads", next);
+    if (location.hash === before) {
+      render();
+    }
+  });
+}
+
+/** My Leads or Team Leads as a board. */
+async function renderLeadsBoard(token, params) {
+  const team = isTeamScope(params);
+  const owner = team ? params.get("owner") || "" : "";
+  const search = params.get("search") || "";
+  shell(team ? "Team Leads" : "My Leads", loading(), "leads");
+  const [teamInfoNow, board] = await Promise.all([
+    team ? loadTeam() : null,
+    team
+      ? get("team/leads/board", {
+          ownerId: owner,
+          search,
+          pageSize: BOARD_PAGE
+        })
+      : get("leads/board", { search, pageSize: BOARD_PAGE })
+  ]);
+  if (token !== renderToken) {
+    return;
+  }
+  const columns = board.columns || [];
+  const columnOptions = {
+    card: leadCard,
+    tone: leadTone,
+    empty: "No leads in this status"
+  };
+  const screen = document.getElementById("screen");
+  screen.classList.add("screen-wide");
+  screen.innerHTML = `
+    ${dealsTop(team ? "team" : "mine", "board")}
+    ${team ? memberSelect(teamInfoNow, owner) : ""}
+    <input class="search" id="search" type="search" placeholder="Search name, phone or email" value="${esc(search)}" />
+    <div class="board-jump">${chips(
+      columns.map((c) => ({ key: c.key, label: c.label, count: c.count || 0 })),
+      columns.length ? columns[0].key : "",
+      "col"
+    )}</div>
+    <div class="board" id="board">${columns.map((c) => boardColumn(c, columnOptions)).join("")}</div>`;
+
+  const current = { search };
+  if (team) {
+    current.scope = "team";
+    current.owner = owner;
+  }
+  wireTeamList("leads", current);
+  wireLeadsViewSwitch(params);
+
+  const boardEl = document.getElementById("board");
+  sizeBoard();
+  const wired = wireBoard(boardEl, columns, token, leadCard, (key, offset) => {
+    const query = { status: key, search, pageSize: BOARD_PAGE, offset };
+    return team
+      ? get("team/leads", { ...query, ownerId: owner })
+      : get("leads", { ...query, bucket: "all" });
+  });
+
+  // a lead whose status was changed goes to the top of its new column
+  const count = (columnEl, by) => {
+    const badge = columnEl.querySelector(".board-count");
+    const now = Math.max(0, (parseInt(badge.textContent, 10) || 0) + by);
+    badge.textContent = now;
+    const chip = wired.jumps.find(
+      (c) => c.dataset.col === columnEl.dataset.col
+    );
+    const chipCount = chip && chip.querySelector("b");
+    if (chipCount) {
+      chipCount.textContent = now;
+    }
+  };
+  wireLeadStatus(boardEl, (cardEl, status) => {
+    const from = cardEl.closest(".board-col");
+    const to = wired.columnEls.find((el) => el.dataset.col === status);
+    if (!to || !from) {
+      render(); // a status that has no column yet: the board is drawn again with it
+      return;
+    }
+    if (to === from) {
+      return;
+    }
+    showLeadStatus(cardEl, status);
+    const body = to.querySelector(".board-body");
+    body.querySelectorAll(".board-empty").forEach((el) => el.remove());
+    body.prepend(cardEl);
+    body.scrollTop = 0;
+    count(from, -1);
+    count(to, 1);
+    wired.moved(from.dataset.col, status);
+    const fromBody = from.querySelector(".board-body");
+    if (!fromBody.querySelector(".board-card, .sentinel")) {
+      fromBody.innerHTML = `<p class="board-empty">No leads in this status</p>`;
+    }
+  });
 }
 
 function renderDeals(token, params) {
@@ -2133,7 +2489,7 @@ function renderDeals(token, params) {
     "deals"
   );
   wireTeamList("deals", null);
-  wireViewSwitch();
+  wireViewSwitch(DEALS_VIEW_KEY);
   root
     .querySelectorAll("[data-step]")
     .forEach((button) =>

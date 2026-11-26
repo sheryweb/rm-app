@@ -1,7 +1,7 @@
 // Keeps the app's own screens available when the network is slow. Network first, so a new
 // version is picked up as soon as it is published; the saved copy is only a fallback.
 // Salesforce data is never stored here: only this site's own files are handled.
-const CACHE = "mira-rm-shell-v37";
+const CACHE = "mira-rm-shell-v38";
 const SHELL = [
   "./",
   "index.html",

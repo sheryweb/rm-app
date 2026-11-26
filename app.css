@@ -2035,6 +2035,100 @@ a.button-outline {
   min-height: 24px;
 }
 
+/* ---------- leads: board columns, Update Status ---------- */
+
+.lead-col-new,
+.lead-col-to-be-contacted {
+  --col: var(--gold);
+}
+
+.lead-col-no-answer {
+  --col: var(--warn);
+}
+
+.lead-col-contacted {
+  --col: var(--info);
+}
+
+.lead-col-cold {
+  --col: #6f8fb5;
+}
+
+.lead-col-warm {
+  --col: #d9822b;
+}
+
+.lead-col-hot {
+  --col: var(--urgent);
+}
+
+.lead-col-closed {
+  --col: #8a93a6;
+}
+
+.lead-actions {
+  flex-wrap: wrap;
+}
+
+.lead-actions .action {
+  flex: 1 1 auto;
+  padding: 0 14px;
+  white-space: nowrap;
+}
+
+.action-status {
+  border: 0;
+  background: var(--navy);
+  color: #fff;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.status-choices {
+  display: grid;
+  gap: 8px;
+  margin: 14px 0 6px;
+}
+
+.status-choice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 48px;
+  padding: 0 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+  color: inherit;
+  font-family: inherit;
+  font-size: 16px;
+  font-weight: 600;
+  text-align: left;
+}
+
+.status-choice small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.status-choice.is-current {
+  background: #f1f3f7;
+  color: var(--muted);
+}
+
+.status-choice.is-picked {
+  border-color: var(--navy);
+  background: var(--navy);
+  color: #fff;
+}
+
+.status-note {
+  margin-top: 8px;
+  font-size: 13px;
+}
+
 /* a wide screen shows every column at once: no jump chips, no snapping */
 @media (min-width: 900px) {
   .board-jump {
