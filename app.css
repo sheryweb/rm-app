@@ -2180,3 +2180,39 @@ a.button-outline {
   background: var(--urgent);
   color: #fff;
 }
+
+/* ------------------------------------------------------------ global search */
+
+.topbar-search {
+  flex: 0 0 auto;
+  margin-right: 8px;
+}
+
+.search-more {
+  margin: 2px 0 6px;
+}
+
+.recent-searches {
+  padding: 4px 0;
+}
+
+.recent-search {
+  display: block;
+  width: 100%;
+  min-height: 46px;
+  padding: 0 16px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 15px;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recent-search:last-child {
+  border-bottom: 0;
+}

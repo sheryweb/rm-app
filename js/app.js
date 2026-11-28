@@ -176,7 +176,10 @@ const TABS = [
   }
 ];
 
-/** options.back = hash to return to: shows a back arrow instead of the profile button. */
+/**
+ * options.back = hash to return to: shows a back arrow instead of the profile button.
+ * options.noSearch = no search button in the top bar (the search screen itself).
+ */
 function shell(title, body, activePath, options) {
   const back = options && options.back;
   const tabs = TABS.map(
@@ -197,6 +200,13 @@ function shell(title, body, activePath, options) {
     <header class="topbar">
       ${lead}
       <h1>${esc(title)}</h1>
+      ${
+        options && options.noSearch
+          ? ""
+          : `<a class="icon-button topbar-search" href="#/search" aria-label="Search">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zm9.5 2.5-4.6-4.6"/></svg>
+      </a>`
+      }
       <button class="icon-button" id="refresh" aria-label="Refresh">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.4-5.7M20 4v5h-5"/></svg>
       </button>
@@ -204,6 +214,13 @@ function shell(title, body, activePath, options) {
     <main class="screen" id="screen">${body}</main>
     <nav class="tabbar">${tabs}</nav>`;
   document.getElementById("refresh").addEventListener("click", render);
+  const searchButton = root.querySelector(".topbar-search");
+  if (searchButton) {
+    // the back arrow of the search screen returns to the screen the search was opened from
+    searchButton.addEventListener("click", () => {
+      searchReturn = "#/" + (location.hash.replace(/^#\/?/, "") || "home");
+    });
+  }
 }
 
 function loading() {
@@ -239,14 +256,15 @@ function infiniteList(listEl, loadPage, renderRow, emptyMessage, token) {
   listEl.after(sentinel);
 
   async function more() {
-    if (busy || done || token !== renderToken) {
+    // a list taken off the screen (the search screen redraws in place) loads nothing more
+    if (busy || done || token !== renderToken || !sentinel.isConnected) {
       return;
     }
     busy = true;
     sentinel.innerHTML = loading();
     try {
       const page = await loadPage(offset);
-      if (token !== renderToken) {
+      if (token !== renderToken || !sentinel.isConnected) {
         return;
       }
       const rows = page.rows || [];
@@ -7287,6 +7305,303 @@ function offerUpdate(version) {
   });
 }
 
+// ------------------------------------------------------------ global search
+// One box for everything, like the Salesforce search box: leads, deals, clients, company
+// contacts and units at once. Salesforce's own search engine does the finding, with the
+// signed-in user's sharing, so the results are the records that user can open in Salesforce.
+// "All" shows the best few of every type; a type's chip lists all of its results.
+
+const RECENT_SEARCH_KEY = "rmapp.recentSearches";
+const RECENT_SEARCH_MAX = 8;
+const SEARCH_TOP = 5;
+const SEARCH_MIN_LETTERS = 2;
+/** Where the back arrow of the search screen leads: the screen the search was opened from. */
+let searchReturn = "#/home";
+
+function recentSearches() {
+  try {
+    const list = JSON.parse(localStorage.getItem(RECENT_SEARCH_KEY) || "[]");
+    return Array.isArray(list)
+      ? list.filter((item) => typeof item === "string")
+      : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function rememberSearch(text) {
+  if (!canSearch(text)) {
+    return;
+  }
+  try {
+    const list = recentSearches().filter(
+      (item) => item.toLowerCase() !== text.toLowerCase()
+    );
+    list.unshift(text);
+    localStorage.setItem(
+      RECENT_SEARCH_KEY,
+      JSON.stringify(list.slice(0, RECENT_SEARCH_MAX))
+    );
+  } catch (e) {
+    // private mode: the search works, it is only not remembered
+  }
+}
+
+/** Salesforce searches from two letters or digits on. */
+function canSearch(text) {
+  return (
+    (String(text || "").match(/[\p{L}\p{N}]/gu) || []).length >=
+    SEARCH_MIN_LETTERS
+  );
+}
+
+function contactRow(contact) {
+  return `
+    <article class="row is-link" data-open="#/contact?id=${esc(contact.id)}&client=${esc(contact.clientId || "")}">
+      <div class="row-head">
+        <h4>${esc(contact.name)}</h4>
+        <span class="pill pill-muted">Contact</span>
+      </div>
+      <p class="muted">${esc([contact.title, contact.clientName].filter(Boolean).join(" · "))}</p>
+      <p class="muted">${esc([contact.mobile, contact.email].filter(Boolean).join(" · "))}</p>
+    </article>`;
+}
+
+const SEARCH_ROWS = {
+  leads: (lead) => leadRow(lead),
+  deals: (deal) => dealRow(deal),
+  clients: (client) => clientRow(client),
+  contacts: (contact) => contactRow(contact),
+  units: (unit) => unitRow(unit)
+};
+
+function searchCount(group) {
+  return (group.count || 0) + (group.countCapped ? "+" : "");
+}
+
+function renderSearch(token, params) {
+  let text = (params.get("q") || "").trim();
+  let type = params.get("type") || "all";
+  if (type !== "all" && !SEARCH_ROWS[type]) {
+    type = "all";
+  }
+  /** The groups (with their counts) of the last "everything" answer, and the text they are for. */
+  let groups = null;
+  let groupsFor = null;
+  let run = 0;
+
+  shell(
+    "Search",
+    `<input class="search" id="global-search" type="search" enterkeyhint="search" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="80" placeholder="Search leads, deals, clients, units" value="${esc(text)}" />
+     <div id="search-chips"></div>
+     <div id="search-results"></div>`,
+    null,
+    { back: searchReturn, noSearch: true }
+  );
+  const input = document.getElementById("global-search");
+  const chipsEl = document.getElementById("search-chips");
+  const results = document.getElementById("search-results");
+
+  function drawChips() {
+    const known = groupsFor === text && groups;
+    if (!known && type === "all") {
+      chipsEl.innerHTML = "";
+      return;
+    }
+    const options = [{ key: "all", label: "All" }];
+    if (known) {
+      groups.forEach((group) =>
+        options.push({
+          key: group.key,
+          label: group.label,
+          count: searchCount(group)
+        })
+      );
+    } else {
+      Object.keys(SEARCH_ROWS).forEach((key) =>
+        options.push({ key, label: key[0].toUpperCase() + key.slice(1) })
+      );
+    }
+    chipsEl.innerHTML = chips(options, type, "search-type");
+  }
+
+  function drawStart() {
+    chipsEl.innerHTML = "";
+    const recent = recentSearches();
+    results.innerHTML = `
+      <p class="hint">Type a name, phone number, email, passport number or unit number. At least ${SEARCH_MIN_LETTERS} characters.</p>
+      ${
+        recent.length
+          ? `<h3 class="section-title">Recent Searches</h3>
+             <div class="card recent-searches">
+               ${recent.map((item) => `<button type="button" class="recent-search" data-recent="${esc(item)}">${esc(item)}</button>`).join("")}
+             </div>
+             <button type="button" class="button-plain" data-recent-clear>Clear Recent Searches</button>`
+          : ""
+      }`;
+  }
+
+  async function draw() {
+    const mine = ++run;
+    if (scrollWatcher) {
+      scrollWatcher.disconnect();
+      scrollWatcher = null;
+    }
+    // the address follows what is on screen, so coming back from a record shows it again
+    const query = new URLSearchParams();
+    if (text) {
+      query.set("q", text);
+    }
+    if (type !== "all") {
+      query.set("type", type);
+    }
+    const address = "#/search" + (query.toString() ? "?" + query : "");
+    if (location.hash !== address) {
+      history.replaceState(null, "", address);
+    }
+    if (!canSearch(text)) {
+      drawStart();
+      return;
+    }
+    if (type !== "all") {
+      drawChips();
+      const label = type[0].toUpperCase() + type.slice(1);
+      results.innerHTML = `<div class="list" id="list"></div>`;
+      infiniteList(
+        document.getElementById("list"),
+        (offset) =>
+          get("search", { q: text, type, pageSize: PAGE_SIZE, offset }),
+        SEARCH_ROWS[type],
+        `No ${label.toLowerCase()} match this search.`,
+        token
+      );
+      if (groupsFor !== text) {
+        // opened straight on one type: the counts for the chips come separately
+        const asked = text;
+        get("search", { q: asked, pageSize: 1 })
+          .then((answer) => {
+            if (token === renderToken && asked === text) {
+              groups = answer.groups || [];
+              groupsFor = asked;
+              drawChips();
+            }
+          })
+          .catch(() => {});
+      }
+      return;
+    }
+    results.innerHTML = loading();
+    try {
+      const asked = text;
+      const answer = await get("search", { q: asked, pageSize: SEARCH_TOP });
+      if (mine !== run || token !== renderToken) {
+        return;
+      }
+      groups = answer.groups || [];
+      groupsFor = asked;
+      drawChips();
+      const filled = groups.filter((group) => group.count > 0);
+      results.innerHTML = filled.length
+        ? filled
+            .map(
+              (group) => `
+          <h3 class="section-title">${esc(group.label)} · ${searchCount(group)}</h3>
+          <div class="list">${group.rows.map(SEARCH_ROWS[group.key]).join("")}</div>
+          ${
+            group.count > group.rows.length
+              ? `<button type="button" class="button-outline search-more" data-view-all="${esc(group.key)}">View All ${searchCount(group)} ${esc(group.label)}</button>`
+              : ""
+          }`
+            )
+            .join("")
+        : `${emptyBox(`No results for "${asked}".`)}
+           <p class="hint">Search matches whole words from their beginning: "Ahm" finds Ahmed. A record created a moment ago can take a minute to appear.</p>`;
+    } catch (error) {
+      if (mine === run && token === renderToken) {
+        handleError(error, results);
+      }
+    }
+  }
+
+  input.addEventListener(
+    "input",
+    debounce(() => {
+      if (token !== renderToken) {
+        return;
+      }
+      const typed = input.value.trim();
+      if (typed !== text) {
+        // new words start from everything again: the chosen type may hold nothing for them
+        text = typed;
+        type = "all";
+        draw();
+      }
+    }, 350)
+  );
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      rememberSearch(input.value.trim());
+      input.blur(); // puts the phone keyboard away
+    }
+  });
+  chipsEl.addEventListener("click", (event) => {
+    const chip = event.target.closest("[data-search-type]");
+    if (chip && chip.dataset.searchType !== type) {
+      type = chip.dataset.searchType;
+      window.scrollTo(0, 0);
+      draw();
+    }
+  });
+  // a result that was worth a tap makes the search worth remembering
+  results.addEventListener(
+    "click",
+    (event) => {
+      if (event.target.closest(".row, [data-view-all]")) {
+        rememberSearch(text);
+      }
+    },
+    true
+  );
+  results.addEventListener("click", (event) => {
+    const all = event.target.closest("[data-view-all]");
+    if (all) {
+      type = all.dataset.viewAll;
+      window.scrollTo(0, 0);
+      draw();
+      return;
+    }
+    const recent = event.target.closest("[data-recent]");
+    if (recent) {
+      text = recent.dataset.recent;
+      type = "all";
+      input.value = text;
+      draw();
+      return;
+    }
+    if (event.target.closest("[data-recent-clear]")) {
+      try {
+        localStorage.removeItem(RECENT_SEARCH_KEY);
+      } catch (e) {
+        // nothing was kept
+      }
+      drawStart();
+      return;
+    }
+    // a unit is selected for a sales offer or a booking, exactly as on the Units screen
+    const unitEl = event.target.closest(".row.is-selectable");
+    if (unitEl) {
+      toggleOfferUnit(JSON.parse(unitEl.dataset.unit), unitEl);
+    }
+  });
+  openOnTap(results);
+  wireLeadStatus(results, showLeadStatus);
+  renderOfferBar();
+  draw();
+  if (!text) {
+    input.focus();
+  }
+}
+
 // ------------------------------------------------------------------- router
 
 async function render() {
@@ -7319,7 +7634,9 @@ async function render() {
     if (path !== "feedback" && path !== "me") {
       lastScreen = location.hash.replace(/^#\/?/, "") || "home";
     }
-    if (path === "leads") {
+    if (path === "search") {
+      renderSearch(token, params);
+    } else if (path === "leads") {
       await renderLeads(token, params);
     } else if (path === "deals") {
       await renderDeals(token, params);
